@@ -390,23 +390,82 @@ cmd_client() {
     read -p "Enter tunnel domain (e.g., t.example.com): " domain
   fi
 
+  # Get slipstream binary (required for --verify)
+  local slipstream_bin="/tmp/slipstream-client"
+  local bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_TAG}/slipstream-client-linux-${arch}"
+
+  if [[ -n "$slipstream_path" ]]; then
+    log "Copying slipstream-client from $slipstream_path..."
+    if ! cp "$slipstream_path" "$slipstream_bin" 2>/dev/null; then
+      error "Cannot copy from $slipstream_path"
+    fi
+  else
+    log "Downloading slipstream-client..."
+    if ! curl -fsSL "$bin_url" -o "$slipstream_bin" 2>/dev/null; then
+      echo ""
+      warn "Cannot download slipstream-client (network blocked?)"
+      echo ""
+      echo "Transfer binary from a non-blocked network:"
+      echo "  $bin_url"
+      echo ""
+      read -p "Path to slipstream-client binary: " slipstream_path
+      if [[ -z "$slipstream_path" ]]; then
+        error "Binary required for verification. Cannot continue."
+      fi
+      if ! cp "$slipstream_path" "$slipstream_bin" 2>/dev/null; then
+        error "Cannot copy from $slipstream_path"
+      fi
+    fi
+  fi
+  chmod +x "$slipstream_bin"
+
+  # Scan settings
+  echo ""
+  echo -e "${YELLOW}=== DNS Scan Settings ===${NC}"
+  echo ""
+  echo "Modes:"
+  echo "  list   - Known working DNS servers (fastest)"
+  echo "  fast   - Sample common IPs per subnet (default)"
+  echo "  medium - More IPs per subnet"
+  echo "  all    - All IPs per subnet (slowest)"
+  echo ""
+  local scan_country="ir"
+  local scan_mode="fast"
+  local scan_workers="500"
+  local scan_timeout="2s"
+  read -p "Country code [ir]: " input_country
+  [[ -n "$input_country" ]] && scan_country="$input_country"
+  read -p "Scan mode [fast]: " input_mode
+  [[ -n "$input_mode" ]] && scan_mode="$input_mode"
+  read -p "Workers [500]: " input_workers
+  [[ -n "$input_workers" ]] && scan_workers="$input_workers"
+  read -p "Timeout [2s]: " input_timeout
+  [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+
   # Run dnscan
   log "Scanning for working DNS servers..."
-  "$DNSCAN_DIR/dnscan" \
-    --mode medium \
-    --domain "$domain" \
-    --data-dir "$DNSCAN_DIR/data" \
-    --output "$SERVERS_FILE" \
-    --workers 500
+  local dnscan_args=(
+    --country "$scan_country"
+    --mode "$scan_mode"
+    --domain "$domain"
+    --data-dir "$DNSCAN_DIR/data"
+    --output "$SERVERS_FILE"
+    --workers "$scan_workers"
+    --timeout "$scan_timeout"
+  )
+  # Add verify if binary available
+  dnscan_args+=(--verify "$slipstream_bin")
 
-  # Check results
+  "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+
+  # Check results (dnscan only outputs verified servers)
   if [[ ! -s "$SERVERS_FILE" ]]; then
-    error "No working DNS servers found. Is your tunnel server running?"
+    error "No DNS servers passed verification. Is your server running correctly?"
   fi
 
   local server_count
   server_count=$(wc -l <"$SERVERS_FILE")
-  log "Found $server_count working DNS servers"
+  log "Found $server_count verified DNS servers"
 
   # Pick best server (first one)
   local best_server
@@ -464,28 +523,14 @@ cmd_client() {
 
   else
     # --- Binary mode (default) ---
-    local bin_url bin_path="/usr/local/bin/slipstream-client"
+    local bin_path="/usr/local/bin/slipstream-client"
 
     # Stop existing service
     systemctl stop slipstream-client 2>/dev/null || true
 
-    if [[ -n "$slipstream_path" ]]; then
-      log "Installing slipstream-client from $slipstream_path..."
-      cp "$slipstream_path" "$bin_path"
-    else
-      bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_TAG}/slipstream-client-linux-${arch}"
-      log "Downloading slipstream-client..."
-      if ! curl -fsSL "$bin_url" -o "$bin_path" 2>/dev/null; then
-        echo ""
-        warn "Cannot download slipstream-client (network blocked?)"
-        echo ""
-        echo "Transfer binary from a non-blocked network:"
-        echo "  $bin_url"
-        echo ""
-        read -p "Path to slipstream-client binary: " slipstream_path
-        cp "$slipstream_path" "$bin_path"
-      fi
-    fi
+    # Move pre-downloaded binary to final location
+    log "Installing slipstream-client..."
+    mv "$slipstream_bin" "$bin_path"
     chmod +x "$bin_path"
 
     # Create systemd service
