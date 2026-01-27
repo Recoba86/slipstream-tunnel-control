@@ -47,7 +47,7 @@ Usage: $0 <command> [options]
 Commands:
   server              Setup slipstream server
   client              Setup slipstream client
-  health              Run health check (called by timer)
+  health              Check DNS server and switch if slow
   status              Show current status
   remove              Remove all tunnel components
 
@@ -58,10 +58,12 @@ Options:
   --docker            Use Docker instead of binary (optional)
   --slipstream <path> Path to slipstream binary or Docker tarball (offline)
   --dnscan <path>     Path to dnscan tarball (client offline install)
+  --dns-file <path>   Custom DNS server list (skips subnet scan)
 
 Examples:
   $0 server --domain t.example.com
   $0 client --domain t.example.com
+  $0 client --domain t.example.com --dns-file /tmp/dns-servers.txt
   $0 client --domain t.example.com --dnscan ./dnscan-linux-amd64.tar.gz --slipstream ./slipstream.tar.gz
 EOF
   exit 0
@@ -324,7 +326,7 @@ EOF
 # ============================================
 cmd_client() {
   need_root
-  local domain="" dnscan_path="" slipstream_path="" port="7000" use_docker=false
+  local domain="" dnscan_path="" slipstream_path="" port="7000" use_docker=false dns_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -347,6 +349,10 @@ cmd_client() {
     --docker)
       use_docker=true
       shift
+      ;;
+    --dns-file)
+      dns_file="$2"
+      shift 2
       ;;
     *) shift ;;
     esac
@@ -392,13 +398,18 @@ cmd_client() {
 
   # Get slipstream binary (required for --verify)
   local slipstream_bin="/tmp/slipstream-client"
+  local installed_bin="/usr/local/bin/slipstream-client"
   local bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_TAG}/slipstream-client-linux-${arch}"
 
-  if [[ -n "$slipstream_path" ]]; then
+  if [[ -x "$installed_bin" ]]; then
+    # Already installed, use existing
+    slipstream_bin="$installed_bin"
+  elif [[ -n "$slipstream_path" ]]; then
     log "Copying slipstream-client from $slipstream_path..."
     if ! cp "$slipstream_path" "$slipstream_bin" 2>/dev/null; then
       error "Cannot copy from $slipstream_path"
     fi
+    chmod +x "$slipstream_bin"
   else
     log "Downloading slipstream-client..."
     if ! curl -fsSL "$bin_url" -o "$slipstream_bin" 2>/dev/null; then
@@ -416,45 +427,53 @@ cmd_client() {
         error "Cannot copy from $slipstream_path"
       fi
     fi
+    chmod +x "$slipstream_bin"
   fi
-  chmod +x "$slipstream_bin"
-
-  # Scan settings
-  echo ""
-  echo -e "${YELLOW}=== DNS Scan Settings ===${NC}"
-  echo ""
-  echo "Modes:"
-  echo "  list   - Known working DNS servers (fastest)"
-  echo "  fast   - Sample common IPs per subnet (default)"
-  echo "  medium - More IPs per subnet"
-  echo "  all    - All IPs per subnet (slowest)"
-  echo ""
-  local scan_country="ir"
-  local scan_mode="fast"
-  local scan_workers="500"
-  local scan_timeout="2s"
-  read -p "Country code [ir]: " input_country
-  [[ -n "$input_country" ]] && scan_country="$input_country"
-  read -p "Scan mode [fast]: " input_mode
-  [[ -n "$input_mode" ]] && scan_mode="$input_mode"
-  read -p "Workers [500]: " input_workers
-  [[ -n "$input_workers" ]] && scan_workers="$input_workers"
-  read -p "Timeout [2s]: " input_timeout
-  [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
 
   # Run dnscan
   log "Scanning for working DNS servers..."
   local dnscan_args=(
-    --country "$scan_country"
-    --mode "$scan_mode"
     --domain "$domain"
     --data-dir "$DNSCAN_DIR/data"
     --output "$SERVERS_FILE"
-    --workers "$scan_workers"
-    --timeout "$scan_timeout"
+    --verify "$slipstream_bin"
   )
-  # Add verify if binary available
-  dnscan_args+=(--verify "$slipstream_bin")
+
+  if [[ -n "$dns_file" ]]; then
+    # Custom DNS file - skip prompts
+    log "Using custom DNS file: $dns_file"
+    dnscan_args+=(--file "$dns_file")
+  else
+    # Scan settings
+    echo ""
+    echo -e "${YELLOW}=== DNS Scan Settings ===${NC}"
+    echo ""
+    echo "Modes:"
+    echo "  list   - Known working DNS servers (fastest)"
+    echo "  fast   - Sample common IPs per subnet (default)"
+    echo "  medium - More IPs per subnet"
+    echo "  all    - All IPs per subnet (slowest)"
+    echo ""
+    local scan_country="ir"
+    local scan_mode="fast"
+    local scan_workers="500"
+    local scan_timeout="2s"
+    read -p "Country code [ir]: " input_country
+    [[ -n "$input_country" ]] && scan_country="$input_country"
+    read -p "Scan mode [fast]: " input_mode
+    [[ -n "$input_mode" ]] && scan_mode="$input_mode"
+    read -p "Workers [500]: " input_workers
+    [[ -n "$input_workers" ]] && scan_workers="$input_workers"
+    read -p "Timeout [2s]: " input_timeout
+    [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+
+    dnscan_args+=(
+      --country "$scan_country"
+      --mode "$scan_mode"
+      --workers "$scan_workers"
+      --timeout "$scan_timeout"
+    )
+  fi
 
   "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
 
@@ -528,10 +547,12 @@ cmd_client() {
     # Stop existing service
     systemctl stop slipstream-client 2>/dev/null || true
 
-    # Move pre-downloaded binary to final location
-    log "Installing slipstream-client..."
-    mv "$slipstream_bin" "$bin_path"
-    chmod +x "$bin_path"
+    # Install binary if not already in place
+    if [[ "$slipstream_bin" != "$bin_path" ]]; then
+      log "Installing slipstream-client..."
+      mv "$slipstream_bin" "$bin_path"
+      chmod +x "$bin_path"
+    fi
 
     # Create systemd service
     log "Creating systemd service..."
@@ -575,37 +596,48 @@ EOF
   echo -e "${GREEN}=== Client Ready ===${NC}"
   echo ""
   echo "Runtime: $runtime"
-  echo "Tunnel running on: 127.0.0.1:$port"
+  echo "Tunnel: 127.0.0.1:$port"
   echo "DNS server: $best_server"
   echo ""
-  echo "Configure your V2ray/Nekobox client:"
-  echo "  Address: 127.0.0.1"
-  echo "  Port: $port"
-  echo ""
-  echo "Health check: runs hourly, switches DNS if needed"
+  echo "Commands:"
+  echo "  Status:  ./dns-tunnel.sh status"
+  echo "  Health:  ./dns-tunnel.sh health"
   if [[ "$runtime" == "docker" ]]; then
-    echo "Logs: docker logs -f slipstream-client"
+    echo "  Logs:    docker logs -f slipstream-client"
+    echo "  Restart: docker restart slipstream-client"
   else
-    echo "Logs: journalctl -u slipstream-client -f"
+    echo "  Logs:    journalctl -u slipstream-client -f"
+    echo "  Restart: systemctl restart slipstream-client"
   fi
+  echo ""
+  echo "Verified servers saved to: $SERVERS_FILE"
 }
 
 # ============================================
 # HEALTH CHECK
 # ============================================
 cmd_health() {
-  [[ ! -f "$CONFIG_FILE" ]] && exit 0
-  [[ ! -f "$SERVERS_FILE" ]] && exit 0
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "No tunnel configured"
+    exit 0
+  fi
+  if [[ ! -f "$SERVERS_FILE" ]]; then
+    echo "No servers file found"
+    exit 0
+  fi
   source "$CONFIG_FILE"
 
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
   # Test current server latency
+  echo "Testing DNS server: $CURRENT_SERVER"
   local latency
   latency=$(test_dns_latency "$CURRENT_SERVER" "$DOMAIN" || echo "9999")
+  echo "Latency: ${latency}ms"
 
   if [[ "$latency" -gt 1000 ]]; then
+    echo "Server slow, checking alternatives..."
     echo "[$timestamp] Current server $CURRENT_SERVER slow (${latency}ms), checking alternatives..." >>"$HEALTH_LOG"
 
     # Find better server
@@ -620,6 +652,7 @@ cmd_health() {
     done <"$SERVERS_FILE"
 
     if [[ -n "$best_server" && "$best_server" != "$CURRENT_SERVER" && "$best_latency" -lt 1000 ]]; then
+      echo "Switching to $best_server (${best_latency}ms)"
       echo "[$timestamp] Switching to $best_server (${best_latency}ms)" >>"$HEALTH_LOG"
 
       # Update config
@@ -669,9 +702,11 @@ EOF
         fi
       fi
     else
+      echo "No better server found"
       echo "[$timestamp] No better server found" >>"$HEALTH_LOG"
     fi
   else
+    echo "Server OK"
     echo "[$timestamp] Server $CURRENT_SERVER OK (${latency}ms)" >>"$HEALTH_LOG"
   fi
 
