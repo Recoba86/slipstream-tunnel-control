@@ -2,9 +2,9 @@
 
 # dns-tunnel-setup
 
-راه‌اندازی خودکار تونل DNS با slipstream. یک اسکریپت برای سرور و کلاینت.
+[English](README.md) | **فارسی**
 
-[English](README.md)
+راه‌اندازی خودکار تونل DNS با slipstream. یک اسکریپت برای سرور و کلاینت.
 
 ## شروع سریع
 

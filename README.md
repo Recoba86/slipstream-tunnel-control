@@ -1,8 +1,8 @@
 # dns-tunnel-setup
 
-Automated DNS tunnel setup with slipstream. One script for server and client.
+**English** | [فارسی](README.fa.md)
 
-[فارسی](README.fa.md)
+Automated DNS tunnel setup with slipstream. One script for server and client.
 
 ## Quick Start
 
