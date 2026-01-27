@@ -1,10 +1,10 @@
 <div dir="rtl">
 
-# dns-tunnel-setup
+# slipstream-tunnel
 
 [English](README.md) | **فارسی**
 
-راه‌اندازی خودکار تونل DNS با slipstream. یک اسکریپت برای سرور و کلاینت.
+راه‌اندازی تونل DNS با slipstream و اسکن خودکار سرورهای DNS توسط dnscan.
 
 ## شروع سریع
 
@@ -114,6 +114,22 @@ chmod +x dns-tunnel.sh
 ```
 
 <div dir="rtl">
+
+## تنظیم x-ui
+
+بعد از اجرای اسکریپت روی سرور و کلاینت:
+
+1. **پنل x-ui را باز کنید** روی سرور (3x-ui، x-ui و غیره)
+
+2. **یک inbound بسازید** روی پورت slipstream سرور
+   - پورت: `2053` (یا مقدار `--port` شما)
+   - پروتکل: VLESS/VMess/...
+
+3. **External proxy اضافه کنید** به inbound
+   - Host: آدرس IP سرور ایران
+   - پورت: `7000` (یا مقدار `--port` کلاینت)
+
+4. **کانفیگ را export کنید** و در اپ V2Ray استفاده کنید
 
 ## عیب‌یابی
 

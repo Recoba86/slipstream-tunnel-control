@@ -1,8 +1,8 @@
-# dns-tunnel-setup
+# slipstream-tunnel
 
 **English** | [فارسی](README.fa.md)
 
-Automated DNS tunnel setup with slipstream. One script for server and client.
+Slipstream DNS tunnel setup with automatic DNS server scanning via dnscan.
 
 ## Quick Start
 
@@ -98,6 +98,22 @@ chmod +x dns-tunnel.sh
 ├── health.log      # Health check history
 └── dnscan/         # dnscan binary and data
 ```
+
+## x-ui Setup
+
+After running the script on both server and client:
+
+1. **Open x-ui panel** on your server (3x-ui, x-ui, etc.)
+
+2. **Create inbound** listening on slipstream server port
+   - Port: `2053` (or your `--port` value)
+   - Protocol: VLESS/VMess/etc.
+
+3. **Add external proxy** to the inbound
+   - Host: IP address of your Iran client machine
+   - Port: `7000` (or your client `--port` value)
+
+4. **Export config** and use in your V2Ray app
 
 ## Troubleshooting
 
