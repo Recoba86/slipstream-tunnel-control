@@ -13,9 +13,7 @@
 </div>
 
 ```bash
-curl -O https://raw.githubusercontent.com/nightowlnerd/dns-tunnel-setup/main/dns-tunnel.sh
-chmod +x dns-tunnel.sh
-./dns-tunnel.sh server
+bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
 ```
 
 <div dir="rtl">
@@ -27,13 +25,21 @@ chmod +x dns-tunnel.sh
 </div>
 
 ```bash
-# اگر شبکه باز است:
-curl -O https://raw.githubusercontent.com/nightowlnerd/dns-tunnel-setup/main/dns-tunnel.sh
-chmod +x dns-tunnel.sh
-./dns-tunnel.sh client
+bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
+```
 
-# اگر شبکه بسته است (حالت آفلاین):
-./dns-tunnel.sh client --dnscan ./dnscan-linux-amd64.tar.gz --slipstream ./slipstream-client-linux-amd64
+<div dir="rtl">
+
+بعد از نصب، دستور `slipstream-tunnel` در سیستم موجود است.
+
+### حالت آفلاین
+
+اگر شبکه بسته است، ابتدا باینری‌ها را دانلود کرده سپس مسیر آنها را بدهید:
+
+</div>
+
+```bash
+slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-client
 ```
 
 <div dir="rtl">
@@ -56,11 +62,11 @@ chmod +x dns-tunnel.sh
 </div>
 
 ```bash
-./dns-tunnel.sh server              # راه‌اندازی سرور
-./dns-tunnel.sh client              # راه‌اندازی کلاینت
-./dns-tunnel.sh status              # نمایش وضعیت
-./dns-tunnel.sh health              # بررسی DNS و تعویض اگر کند باشد
-./dns-tunnel.sh remove              # حذف همه چیز
+slipstream-tunnel server    # راه‌اندازی سرور
+slipstream-tunnel client    # راه‌اندازی کلاینت
+slipstream-tunnel status    # نمایش وضعیت
+slipstream-tunnel health    # بررسی DNS و تعویض اگر کند باشد
+slipstream-tunnel remove    # حذف همه چیز
 ```
 
 <div dir="rtl">

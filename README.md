@@ -9,9 +9,7 @@ Slipstream DNS tunnel setup with automatic DNS server scanning via dnscan.
 ### Server (outside Iran)
 
 ```bash
-curl -O https://raw.githubusercontent.com/nightowlnerd/dns-tunnel-setup/main/dns-tunnel.sh
-chmod +x dns-tunnel.sh
-./dns-tunnel.sh server
+bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
 ```
 
 Follow the prompts to configure Cloudflare DNS.
@@ -19,13 +17,17 @@ Follow the prompts to configure Cloudflare DNS.
 ### Client (inside Iran)
 
 ```bash
-# If network is not blocked:
-curl -O https://raw.githubusercontent.com/nightowlnerd/dns-tunnel-setup/main/dns-tunnel.sh
-chmod +x dns-tunnel.sh
-./dns-tunnel.sh client
+bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
+```
 
-# If network is blocked (offline mode):
-./dns-tunnel.sh client --dnscan ./dnscan-linux-amd64.tar.gz --slipstream ./slipstream-client-linux-amd64
+After install, `slipstream-tunnel` command is available globally.
+
+### Offline Mode
+
+If network is blocked, download binaries first then provide paths:
+
+```bash
+slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-client
 ```
 
 ## Prerequisites
@@ -46,11 +48,11 @@ chmod +x dns-tunnel.sh
 ## Commands
 
 ```bash
-./dns-tunnel.sh server              # Setup server
-./dns-tunnel.sh client              # Setup client
-./dns-tunnel.sh status              # Show current status
-./dns-tunnel.sh health              # Check DNS and switch if slow
-./dns-tunnel.sh remove              # Remove everything
+slipstream-tunnel server    # Setup server
+slipstream-tunnel client    # Setup client
+slipstream-tunnel status    # Show current status
+slipstream-tunnel health    # Check DNS and switch if slow
+slipstream-tunnel remove    # Remove everything
 ```
 
 ## Options
