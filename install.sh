@@ -42,7 +42,7 @@ need_root() {
 
 usage() {
   cat <<EOF
-Usage: $0 <command> [options]
+Usage: slipstream-tunnel <command> [options]
 
 Commands:
   server              Setup slipstream server
@@ -61,10 +61,9 @@ Options:
   --dns-file <path>   Custom DNS server list (skips subnet scan)
 
 Examples:
-  $0 server --domain t.example.com
-  $0 client --domain t.example.com
-  $0 client --domain t.example.com --dns-file /tmp/dns-servers.txt
-  $0 client --domain t.example.com --dnscan ./dnscan-linux-amd64.tar.gz --slipstream ./slipstream.tar.gz
+  slipstream-tunnel server --domain t.example.com
+  slipstream-tunnel client --domain t.example.com
+  slipstream-tunnel client --dns-file /tmp/dns-servers.txt
 EOF
   exit 0
 }
@@ -84,6 +83,22 @@ detect_os() {
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   [[ "$os" == "linux" ]] || error "Unsupported OS: $os (Linux only)"
   echo "linux"
+}
+
+install_self() {
+  local install_path="/usr/local/bin/slipstream-tunnel"
+  local current_script
+  current_script=$(realpath "$0")
+
+  # Skip if already installed there
+  if [[ "$current_script" == "$install_path" ]]; then
+    return
+  fi
+
+  log "Installing slipstream-tunnel command..."
+  cp "$current_script" "$install_path"
+  chmod +x "$install_path"
+  log "Installed: slipstream-tunnel"
 }
 
 # ============================================
@@ -304,6 +319,9 @@ RUNTIME=$runtime
 PORT=$port
 EOF
 
+  # Install global command
+  install_self
+
   echo ""
   echo -e "${GREEN}=== Server Ready ===${NC}"
   echo ""
@@ -311,13 +329,14 @@ EOF
   echo ""
   echo "Next steps:"
   echo "  1. In 3x-ui panel: create inbound on port $port"
-  echo "  2. Transfer slipstream binary/tarball to client"
-  echo "  3. On client run: tunnel.sh client --domain $domain"
+  echo "  2. On client run the same install command"
   echo ""
+  echo "Commands:"
+  echo "  slipstream-tunnel status"
   if [[ "$runtime" == "docker" ]]; then
-    echo "Logs: docker logs -f slipstream-server"
+    echo "  docker logs -f slipstream-server"
   else
-    echo "Logs: journalctl -u slipstream-server -f"
+    echo "  journalctl -u slipstream-server -f"
   fi
 }
 
@@ -592,6 +611,9 @@ EOF
   # Setup health check timer
   setup_health_timer
 
+  # Install global command
+  install_self
+
   echo ""
   echo -e "${GREEN}=== Client Ready ===${NC}"
   echo ""
@@ -600,14 +622,12 @@ EOF
   echo "DNS server: $best_server"
   echo ""
   echo "Commands:"
-  echo "  Status:  ./dns-tunnel.sh status"
-  echo "  Health:  ./dns-tunnel.sh health"
+  echo "  slipstream-tunnel status"
+  echo "  slipstream-tunnel health"
   if [[ "$runtime" == "docker" ]]; then
-    echo "  Logs:    docker logs -f slipstream-client"
-    echo "  Restart: docker restart slipstream-client"
+    echo "  docker logs -f slipstream-client"
   else
-    echo "  Logs:    journalctl -u slipstream-client -f"
-    echo "  Restart: systemctl restart slipstream-client"
+    echo "  journalctl -u slipstream-client -f"
   fi
   echo ""
   echo "Verified servers saved to: $SERVERS_FILE"
@@ -729,8 +749,7 @@ test_dns_latency() {
 }
 
 setup_health_timer() {
-  local script_path
-  script_path=$(realpath "$0")
+  local script_path="/usr/local/bin/slipstream-tunnel"
 
   # Create systemd service
   cat >/etc/systemd/system/tunnel-health.service <<EOF
@@ -860,6 +879,11 @@ cmd_remove() {
   if [[ -f /usr/local/bin/slipstream-client ]]; then
     log "Removing slipstream-client binary..."
     rm -f /usr/local/bin/slipstream-client
+  fi
+
+  if [[ -f /usr/local/bin/slipstream-tunnel ]]; then
+    log "Removing slipstream-tunnel command..."
+    rm -f /usr/local/bin/slipstream-tunnel
   fi
 
   # Remove health check timer
