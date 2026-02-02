@@ -468,44 +468,54 @@ cmd_client() {
     --verify "$slipstream_bin"
   )
 
+  # Scan settings
+  echo ""
+  echo -e "${YELLOW}=== DNS Scan Settings ===${NC}"
+  echo ""
+
   if [[ -n "$dns_file" ]]; then
-    # Custom DNS file - skip prompts
+    # Custom DNS file from CLI flag
     log "Using custom DNS file: $dns_file"
     dnscan_args+=(--file "$dns_file")
   else
-    # Scan settings
-    echo ""
-    echo -e "${YELLOW}=== DNS Scan Settings ===${NC}"
-    echo ""
-    echo "Modes:"
-    echo "  list   - Known working DNS servers (fastest)"
-    echo "  fast   - Sample common IPs per subnet (default)"
-    echo "  medium - More IPs per subnet"
-    echo "  all    - All IPs per subnet (slowest)"
-    echo ""
-    local scan_country="ir"
-    local scan_mode="fast"
-    local scan_workers="500"
-    local scan_timeout="2s"
-    local scan_threshold="50"
-    read -p "Country code [ir]: " input_country
-    [[ -n "$input_country" ]] && scan_country="$input_country"
-    read -p "Scan mode [fast]: " input_mode
-    [[ -n "$input_mode" ]] && scan_mode="$input_mode"
-    read -p "Workers [500]: " input_workers
-    [[ -n "$input_workers" ]] && scan_workers="$input_workers"
-    read -p "Timeout [2s]: " input_timeout
-    [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
-    read -p "Benchmark threshold % [50]: " input_threshold
-    [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
+    # Ask for custom file first
+    read -e -p "Custom DNS file (Enter to scan): " input_dns_file
+    if [[ -n "$input_dns_file" ]]; then
+      log "Using custom DNS file: $input_dns_file"
+      dnscan_args+=(--file "$input_dns_file")
+    else
+      # Show scan options
+      echo ""
+      echo "Modes:"
+      echo "  list   - Known working DNS servers (fastest)"
+      echo "  fast   - Sample common IPs per subnet (default)"
+      echo "  medium - More IPs per subnet"
+      echo "  all    - All IPs per subnet (slowest)"
+      echo ""
+      local scan_country="ir"
+      local scan_mode="fast"
+      local scan_workers="500"
+      local scan_timeout="2s"
+      local scan_threshold="50"
+      read -p "Country code [ir]: " input_country
+      [[ -n "$input_country" ]] && scan_country="$input_country"
+      read -p "Scan mode [fast]: " input_mode
+      [[ -n "$input_mode" ]] && scan_mode="$input_mode"
+      read -p "Workers [500]: " input_workers
+      [[ -n "$input_workers" ]] && scan_workers="$input_workers"
+      read -p "Timeout [2s]: " input_timeout
+      [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+      read -p "Benchmark threshold % [50]: " input_threshold
+      [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
 
-    dnscan_args+=(
-      --country "$scan_country"
-      --mode "$scan_mode"
-      --workers "$scan_workers"
-      --threshold "$scan_threshold"
-      --timeout "$scan_timeout"
-    )
+      dnscan_args+=(
+        --country "$scan_country"
+        --mode "$scan_mode"
+        --workers "$scan_workers"
+        --threshold "$scan_threshold"
+        --timeout "$scan_timeout"
+      )
+    fi
   fi
 
   "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
