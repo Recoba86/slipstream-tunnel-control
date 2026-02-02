@@ -139,15 +139,28 @@ cmd_server() {
 
   log "=== Slipstream Server Setup ==="
 
-  # Get server IP
+  # Get server IP with failover and validation
   log "Detecting server IP..."
-  local server_ip
-  server_ip=$(curl -s --connect-timeout 5 ifconfig.me)
-  [[ -z "$server_ip" ]] && server_ip=$(curl -s --connect-timeout 5 ip.me)
-  [[ -z "$server_ip" ]] && server_ip=$(hostname -I | awk '{print $1}')
+  local server_ip=""
+  local ip_services=(
+    "https://api.ipify.org"
+    "https://ifconfig.me"
+    "https://icanhazip.com"
+    "https://ipecho.net/plain"
+  )
+
+  for service in "${ip_services[@]}"; do
+    local fetched_ip
+    fetched_ip=$(curl -s --max-time 5 "$service" | tr -d '[:space:]')
+    if [[ "$fetched_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      server_ip="$fetched_ip"
+      break
+    fi
+  done
 
   if [[ -z "$server_ip" ]]; then
-    read -p "Could not detect IP. Enter server IP: " server_ip
+    warn "Could not auto-detect IP (services blocked or unreachable)"
+    read -p "Enter server IP: " server_ip
   fi
 
   echo ""
