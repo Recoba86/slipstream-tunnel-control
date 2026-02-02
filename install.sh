@@ -87,16 +87,23 @@ detect_os() {
 
 install_self() {
   local install_path="/usr/local/bin/slipstream-tunnel"
-  local current_script
-  current_script=$(realpath "$0")
+  local current_script=""
 
-  # Skip if already installed there
-  if [[ "$current_script" == "$install_path" ]]; then
-    return
+  if [[ -f "$0" ]]; then
+    current_script=$(realpath "$0")
+    # Skip only if running FROM install location
+    [[ "$current_script" == "$install_path" ]] && return
   fi
 
   log "Installing slipstream-tunnel command..."
-  cp "$current_script" "$install_path"
+
+  if [[ -n "$current_script" ]]; then
+    cp "$current_script" "$install_path"
+  else
+    # Pipe/process substitution - download instead
+    curl -fsSL "https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh" -o "$install_path"
+  fi
+
   chmod +x "$install_path"
   log "Installed: slipstream-tunnel"
 }
