@@ -423,11 +423,14 @@ cmd_client() {
   fi
 
   # Get slipstream binary (required for --verify)
-  local slipstream_bin="/tmp/slipstream-client"
+  local slipstream_bin="$TUNNEL_DIR/slipstream-client"
   local installed_bin="/usr/local/bin/slipstream-client"
   local bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_TAG}/slipstream-client-linux-${arch}"
 
-  if [[ -x "$installed_bin" ]]; then
+  if [[ -x "$slipstream_bin" ]]; then
+    # Use cached binary
+    log "Using cached slipstream-client"
+  elif [[ -x "$installed_bin" ]]; then
     # Already installed, use existing
     slipstream_bin="$installed_bin"
   elif [[ -n "$slipstream_path" ]]; then
