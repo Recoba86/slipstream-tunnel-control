@@ -487,6 +487,7 @@ cmd_client() {
     local scan_mode="fast"
     local scan_workers="500"
     local scan_timeout="2s"
+    local scan_threshold="50"
     read -p "Country code [ir]: " input_country
     [[ -n "$input_country" ]] && scan_country="$input_country"
     read -p "Scan mode [fast]: " input_mode
@@ -495,11 +496,14 @@ cmd_client() {
     [[ -n "$input_workers" ]] && scan_workers="$input_workers"
     read -p "Timeout [2s]: " input_timeout
     [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+    read -p "Benchmark threshold % [50]: " input_threshold
+    [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
 
     dnscan_args+=(
       --country "$scan_country"
       --mode "$scan_mode"
       --workers "$scan_workers"
+      --threshold "$scan_threshold"
       --timeout "$scan_timeout"
     )
   fi
