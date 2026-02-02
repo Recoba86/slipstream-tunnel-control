@@ -410,7 +410,7 @@ cmd_client() {
         echo "Transfer this file from a non-blocked network:"
         echo "  https://github.com/nightowlnerd/dnscan/releases/latest/download/dnscan-${os}-${arch}.tar.gz"
         echo ""
-        read -p "Path to dnscan tarball: " dnscan_path
+        read -e -p "Path to dnscan tarball: " dnscan_path
         tar xzf "$dnscan_path" -C "$DNSCAN_DIR"
       fi
     fi
@@ -438,14 +438,14 @@ cmd_client() {
     chmod +x "$slipstream_bin"
   else
     log "Downloading slipstream-client..."
-    if ! curl -fsSL "$bin_url" -o "$slipstream_bin" 2>/dev/null; then
+    if ! curl -fsSL --connect-timeout 15 "$bin_url" -o "$slipstream_bin" 2>/dev/null; then
       echo ""
       warn "Cannot download slipstream-client (network blocked?)"
       echo ""
       echo "Transfer binary from a non-blocked network:"
       echo "  $bin_url"
       echo ""
-      read -p "Path to slipstream-client binary: " slipstream_path
+      read -e -p "Path to slipstream-client binary: " slipstream_path
       if [[ -z "$slipstream_path" ]]; then
         error "Binary required for verification. Cannot continue."
       fi
@@ -548,7 +548,7 @@ cmd_client() {
           echo ""
           echo "Transfer slipstream-client.tar.gz from your server"
           echo ""
-          read -p "Path to slipstream tarball: " slipstream_path
+          read -e -p "Path to slipstream tarball: " slipstream_path
           docker load <"$slipstream_path"
         fi
       fi
