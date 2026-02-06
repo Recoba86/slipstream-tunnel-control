@@ -49,6 +49,7 @@ Commands:
   client              Setup slipstream client
   health              Check DNS server and switch if slow
   status              Show current status
+  logs                View tunnel logs (-f to follow)
   remove              Remove all tunnel components
 
 Options:
@@ -819,6 +820,35 @@ EOF
 }
 
 # ============================================
+# LOGS
+# ============================================
+cmd_logs() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    error "No tunnel configured"
+  fi
+  source "$CONFIG_FILE"
+
+  local follow=false
+  [[ "${1:-}" == "-f" ]] && follow=true
+
+  local service_name="slipstream-${MODE:-client}"
+
+  if [[ "${RUNTIME:-binary}" == "docker" ]]; then
+    if $follow; then
+      docker logs -f "$service_name"
+    else
+      docker logs --tail 100 "$service_name"
+    fi
+  else
+    if $follow; then
+      journalctl -u "$service_name" -f
+    else
+      journalctl -u "$service_name" -n 100 --no-pager
+    fi
+  fi
+}
+
+# ============================================
 # STATUS
 # ============================================
 cmd_status() {
@@ -979,6 +1009,10 @@ client)
   ;;
 health) cmd_health ;;
 status) cmd_status ;;
+logs)
+  shift
+  cmd_logs "$@"
+  ;;
 remove) cmd_remove ;;
 -h | --help | help) usage ;;
 *) error "Unknown command: $1" ;;
