@@ -51,6 +51,7 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 slipstream-tunnel server    # Setup server
 slipstream-tunnel client    # Setup client
 slipstream-tunnel status    # Show current status
+slipstream-tunnel logs      # View logs (add -f to follow)
 slipstream-tunnel health    # Check DNS and switch if slow
 slipstream-tunnel remove    # Remove everything
 ```

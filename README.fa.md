@@ -65,6 +65,7 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 slipstream-tunnel server    # راه‌اندازی سرور
 slipstream-tunnel client    # راه‌اندازی کلاینت
 slipstream-tunnel status    # نمایش وضعیت
+slipstream-tunnel logs      # مشاهده لاگ (با -f برای دنبال کردن)
 slipstream-tunnel health    # بررسی DNS و تعویض اگر کند باشد
 slipstream-tunnel remove    # حذف همه چیز
 ```
