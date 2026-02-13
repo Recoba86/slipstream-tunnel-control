@@ -495,12 +495,28 @@ cmd_client() {
     # Custom DNS file from CLI flag
     log "Using custom DNS file: $dns_file"
     dnscan_args+=(--file "$dns_file")
+    local scan_workers="500" scan_timeout="2s" scan_threshold="50"
+    read -p "Workers [500]: " input_workers
+    [[ -n "$input_workers" ]] && scan_workers="$input_workers"
+    read -p "Timeout [2s]: " input_timeout
+    [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+    read -p "Benchmark threshold % [50]: " input_threshold
+    [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
+    dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
   else
     # Ask for custom file first
     read -e -p "Custom DNS file (Enter to scan): " input_dns_file
     if [[ -n "$input_dns_file" ]]; then
       log "Using custom DNS file: $input_dns_file"
       dnscan_args+=(--file "$input_dns_file")
+      local scan_workers="500" scan_timeout="2s" scan_threshold="50"
+      read -p "Workers [500]: " input_workers
+      [[ -n "$input_workers" ]] && scan_workers="$input_workers"
+      read -p "Timeout [2s]: " input_timeout
+      [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+      read -p "Benchmark threshold % [50]: " input_threshold
+      [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
+      dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
     else
       # Show scan options
       echo ""
