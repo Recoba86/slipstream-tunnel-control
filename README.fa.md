@@ -55,7 +55,9 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 - ماشین لینوکس با دسترسی root
 - برای حالت آفلاین:
   - [dnscan releases](https://github.com/nightowlnerd/dnscan/releases)
-  - [slipstream releases](https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases)
+  - [slipstream releases](https://github.com/nightowlnerd/slipstream-rust/releases)
+
+از [فورک slipstream-rust](https://github.com/nightowlnerd/slipstream-rust) با رفع باگ‌های مصرف CPU و قطع اتصال استفاده می‌کند. ریپوی اصلی دیگر فعال نیست.
 
 ## دستورات
 
@@ -159,6 +161,6 @@ slipstream-tunnel remove    # حذف همه چیز
 - از حالت آفلاین با `--dnscan` و `--slipstream` استفاده کنید
 - باینری‌ها را دانلود کنید:
   - https://github.com/nightowlnerd/dnscan/releases
-  - https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases
+  - https://github.com/nightowlnerd/slipstream-rust/releases
 
 </div>

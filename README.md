@@ -43,7 +43,9 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 - Linux machine with root access
 - For offline:
   - [dnscan releases](https://github.com/nightowlnerd/dnscan/releases)
-  - [slipstream releases](https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases)
+  - [slipstream releases](https://github.com/nightowlnerd/slipstream-rust/releases)
+
+Uses a [fork of slipstream-rust](https://github.com/nightowlnerd/slipstream-rust) with fixes for CPU spin and connection stall bugs. The upstream repo is no longer actively maintained.
 
 ## Commands
 
@@ -142,4 +144,4 @@ After running the script on both server and client:
 - Use offline mode with `--dnscan` and `--slipstream` options
 - Get binaries from:
   - https://github.com/nightowlnerd/dnscan/releases
-  - https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases
+  - https://github.com/nightowlnerd/slipstream-rust/releases
