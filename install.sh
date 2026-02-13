@@ -4,12 +4,9 @@ set -euo pipefail
 
 # =============================================================================
 # Slipstream source configuration
-# Change these when upstream provides official releases or Docker images
 # =============================================================================
-# Binary releases (default mode)
-# Switch to "Mygod/slipstream-rust" when they publish releases
-SLIPSTREAM_REPO="AliRezaBeigy/slipstream-rust-deploy"
-SLIPSTREAM_TAG="5fc4ecd"
+# Binary releases (default mode) - uses GitHub "latest" release
+SLIPSTREAM_REPO="nightowlnerd/slipstream-rust"
 
 # Docker image (--docker mode)
 # Switch to official image when available
@@ -73,7 +70,7 @@ detect_arch() {
   local arch
   arch=$(uname -m)
   case "$arch" in
-  x86_64) echo "amd64" ;;
+  x86_64) echo "x86_64" ;;
   aarch64 | arm64) echo "arm64" ;;
   *) error "Unsupported architecture: $arch" ;;
   esac
@@ -297,9 +294,12 @@ cmd_server() {
       log "Installing slipstream-server from $slipstream_path..."
       cp "$slipstream_path" "$bin_path"
     else
-      bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_TAG}/slipstream-server-linux-${arch}"
+      bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/latest/download/slipstream-linux-${arch}.tar.gz"
       log "Downloading slipstream-server..."
-      curl -fsSL "$bin_url" -o "$bin_path" || error "Failed to download slipstream-server"
+      curl -fsSL "$bin_url" -o /tmp/slipstream.tar.gz || error "Failed to download slipstream"
+      tar xzf /tmp/slipstream.tar.gz -C /tmp slipstream-server
+      mv /tmp/slipstream-server "$bin_path"
+      rm -f /tmp/slipstream.tar.gz
     fi
     chmod +x "$bin_path"
 
@@ -439,7 +439,7 @@ cmd_client() {
   # Get slipstream binary (required for --verify)
   local slipstream_bin="$TUNNEL_DIR/slipstream-client"
   local installed_bin="/usr/local/bin/slipstream-client"
-  local bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_TAG}/slipstream-client-linux-${arch}"
+  local bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/latest/download/slipstream-linux-${arch}.tar.gz"
 
   if [[ -x "$slipstream_bin" ]]; then
     # Use cached binary
@@ -455,11 +455,15 @@ cmd_client() {
     chmod +x "$slipstream_bin"
   else
     log "Downloading slipstream-client..."
-    if ! curl -fsSL --connect-timeout 15 "$bin_url" -o "$slipstream_bin" 2>/dev/null; then
+    if curl -fsSL --connect-timeout 15 "$bin_url" -o /tmp/slipstream.tar.gz 2>/dev/null; then
+      tar xzf /tmp/slipstream.tar.gz -C /tmp slipstream-client
+      mv /tmp/slipstream-client "$slipstream_bin"
+      rm -f /tmp/slipstream.tar.gz
+    else
       echo ""
       warn "Cannot download slipstream-client (network blocked?)"
       echo ""
-      echo "Transfer binary from a non-blocked network:"
+      echo "Transfer tarball from a non-blocked network:"
       echo "  $bin_url"
       echo ""
       read -e -p "Path to slipstream-client binary: " slipstream_path
