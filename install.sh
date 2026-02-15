@@ -5,12 +5,8 @@ set -euo pipefail
 # =============================================================================
 # Slipstream source configuration
 # =============================================================================
-# Binary releases (default mode) - uses GitHub "latest" release
+# Binary releases - uses GitHub "latest" release
 SLIPSTREAM_REPO="nightowlnerd/slipstream-rust"
-
-# Docker image (--docker mode)
-# Switch to official image when available
-SLIPSTREAM_DOCKER_IMAGE="bashsiz/slipstream-rust:latest"
 # =============================================================================
 
 TUNNEL_DIR="$HOME/.tunnel"
@@ -53,8 +49,7 @@ Options:
   --domain <domain>   Tunnel domain (e.g., t.example.com)
   --port <port>       Server: target port (default: 2053)
                       Client: listen port (default: 7000)
-  --docker            Use Docker instead of binary (optional)
-  --slipstream <path> Path to slipstream binary or Docker tarball (offline)
+  --slipstream <path> Path to slipstream binary (offline)
   --dnscan <path>     Path to dnscan tarball (client offline install)
   --dns-file <path>   Custom DNS server list (skips subnet scan)
 
@@ -111,7 +106,7 @@ install_self() {
 # ============================================
 cmd_server() {
   need_root
-  local domain="" port="2053" use_docker=false slipstream_path=""
+  local domain="" port="2053" slipstream_path=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -122,10 +117,6 @@ cmd_server() {
     --port)
       port="$2"
       shift 2
-      ;;
-    --docker)
-      use_docker=true
-      shift
       ;;
     --slipstream)
       slipstream_path="$2"
@@ -247,65 +238,28 @@ cmd_server() {
       -subj "/CN=$domain"
   fi
 
-  local runtime="binary"
+  local arch bin_url bin_path="/usr/local/bin/slipstream-server"
+  arch=$(detect_arch)
 
-  if [[ "$use_docker" == true ]]; then
-    # --- Docker mode ---
-    runtime="docker"
+  # Stop existing service
+  systemctl stop slipstream-server 2>/dev/null || true
 
-    if ! command -v docker &>/dev/null; then
-      log "Installing Docker..."
-      curl -fsSL https://get.docker.com | sh
-      systemctl enable docker
-      systemctl start docker
-    fi
-
-    log "Pulling slipstream Docker image..."
-    docker pull "$SLIPSTREAM_DOCKER_IMAGE" || warn "Pull failed, using cached image"
-
-    docker rm -f slipstream-server 2>/dev/null || true
-
-    log "Starting slipstream server (Docker)..."
-    docker run -d --restart=unless-stopped \
-      --name slipstream-server \
-      --network host \
-      -v "$CERT_DIR":/opt/cert:ro \
-      "$SLIPSTREAM_DOCKER_IMAGE" \
-      slipstream-server \
-      --dns-listen-port 53 \
-      --target-address "127.0.0.1:$port" \
-      --domain "$domain" \
-      --cert /opt/cert/cert.pem \
-      --key /opt/cert/key.pem
-
-    # Create client tarball for transfer
-    log "Creating client tarball for transfer..."
-    docker save "$SLIPSTREAM_DOCKER_IMAGE" | gzip >~/slipstream-client.tar.gz
-
+  if [[ -n "$slipstream_path" ]]; then
+    log "Installing slipstream-server from $slipstream_path..."
+    cp "$slipstream_path" "$bin_path"
   else
-    # --- Binary mode (default) ---
-    local arch bin_url bin_path="/usr/local/bin/slipstream-server"
-    arch=$(detect_arch)
+    bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/latest/download/slipstream-linux-${arch}.tar.gz"
+    log "Downloading slipstream-server..."
+    curl -fsSL "$bin_url" -o /tmp/slipstream.tar.gz || error "Failed to download slipstream"
+    tar xzf /tmp/slipstream.tar.gz -C /tmp slipstream-server
+    mv /tmp/slipstream-server "$bin_path"
+    rm -f /tmp/slipstream.tar.gz
+  fi
+  chmod +x "$bin_path"
 
-    # Stop existing service
-    systemctl stop slipstream-server 2>/dev/null || true
-
-    if [[ -n "$slipstream_path" ]]; then
-      log "Installing slipstream-server from $slipstream_path..."
-      cp "$slipstream_path" "$bin_path"
-    else
-      bin_url="https://github.com/${SLIPSTREAM_REPO}/releases/latest/download/slipstream-linux-${arch}.tar.gz"
-      log "Downloading slipstream-server..."
-      curl -fsSL "$bin_url" -o /tmp/slipstream.tar.gz || error "Failed to download slipstream"
-      tar xzf /tmp/slipstream.tar.gz -C /tmp slipstream-server
-      mv /tmp/slipstream-server "$bin_path"
-      rm -f /tmp/slipstream.tar.gz
-    fi
-    chmod +x "$bin_path"
-
-    # Create systemd service
-    log "Creating systemd service..."
-    cat >/etc/systemd/system/slipstream-server.service <<EOF
+  # Create systemd service
+  log "Creating systemd service..."
+  cat >/etc/systemd/system/slipstream-server.service <<EOF
 [Unit]
 Description=Slipstream DNS Tunnel Server
 After=network.target
@@ -325,18 +279,16 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable slipstream-server
-    systemctl start slipstream-server
-    log "Started slipstream-server service"
-  fi
+  systemctl daemon-reload
+  systemctl enable slipstream-server
+  systemctl start slipstream-server
+  log "Started slipstream-server service"
 
   # Save config
   mkdir -p "$TUNNEL_DIR"
   cat >"$CONFIG_FILE" <<EOF
 DOMAIN=$domain
 MODE=server
-RUNTIME=$runtime
 PORT=$port
 EOF
 
@@ -346,19 +298,13 @@ EOF
   echo ""
   echo -e "${GREEN}=== Server Ready ===${NC}"
   echo ""
-  echo "Runtime: $runtime"
-  echo ""
   echo "Next steps:"
   echo "  1. In 3x-ui panel: create inbound on port $port"
   echo "  2. On client run the same install command"
   echo ""
   echo "Commands:"
   echo "  slipstream-tunnel status"
-  if [[ "$runtime" == "docker" ]]; then
-    echo "  docker logs -f slipstream-server"
-  else
-    echo "  journalctl -u slipstream-server -f"
-  fi
+  echo "  journalctl -u slipstream-server -f"
 }
 
 # ============================================
@@ -366,7 +312,7 @@ EOF
 # ============================================
 cmd_client() {
   need_root
-  local domain="" dnscan_path="" slipstream_path="" port="7000" use_docker=false dns_file=""
+  local domain="" dnscan_path="" slipstream_path="" port="7000" dns_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -385,10 +331,6 @@ cmd_client() {
     --port)
       port="$2"
       shift 2
-      ;;
-    --docker)
-      use_docker=true
-      shift
       ;;
     --dns-file)
       dns_file="$2"
@@ -568,72 +510,21 @@ cmd_client() {
   best_server=$(head -1 "$SERVERS_FILE")
   log "Using DNS server: $best_server"
 
-  local runtime="binary"
+  local bin_path="/usr/local/bin/slipstream-client"
 
-  if [[ "$use_docker" == true ]]; then
-    # --- Docker mode ---
-    runtime="docker"
+  # Stop existing service
+  systemctl stop slipstream-client 2>/dev/null || true
 
-    if ! command -v docker &>/dev/null; then
-      log "Installing Docker..."
-      if curl -fsSL --connect-timeout 10 https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null; then
-        sh /tmp/get-docker.sh
-        rm -f /tmp/get-docker.sh
-        systemctl enable docker
-        systemctl start docker
-      else
-        error "Cannot install Docker. Please install manually and retry."
-      fi
-    fi
+  # Install binary if not already in place
+  if [[ "$slipstream_bin" != "$bin_path" ]]; then
+    log "Installing slipstream-client..."
+    mv "$slipstream_bin" "$bin_path"
+    chmod +x "$bin_path"
+  fi
 
-    # Get slipstream Docker image
-    if ! docker image inspect "$SLIPSTREAM_DOCKER_IMAGE" &>/dev/null; then
-      if [[ -n "$slipstream_path" ]]; then
-        log "Loading slipstream image from $slipstream_path..."
-        docker load <"$slipstream_path"
-      else
-        log "Pulling slipstream Docker image..."
-        if ! docker pull "$SLIPSTREAM_DOCKER_IMAGE" 2>/dev/null; then
-          echo ""
-          warn "Cannot pull Docker image (network blocked?)"
-          echo ""
-          echo "Transfer slipstream-client.tar.gz from your server"
-          echo ""
-          read -e -p "Path to slipstream tarball: " slipstream_path
-          docker load <"$slipstream_path"
-        fi
-      fi
-    fi
-
-    docker rm -f slipstream-client 2>/dev/null || true
-
-    log "Starting slipstream client (Docker)..."
-    docker run -d --restart=unless-stopped \
-      --name slipstream-client \
-      --network host \
-      "$SLIPSTREAM_DOCKER_IMAGE" \
-      slipstream-client \
-      --resolver "${best_server}:53" \
-      --domain "$domain" \
-      --tcp-listen-port "$port"
-
-  else
-    # --- Binary mode (default) ---
-    local bin_path="/usr/local/bin/slipstream-client"
-
-    # Stop existing service
-    systemctl stop slipstream-client 2>/dev/null || true
-
-    # Install binary if not already in place
-    if [[ "$slipstream_bin" != "$bin_path" ]]; then
-      log "Installing slipstream-client..."
-      mv "$slipstream_bin" "$bin_path"
-      chmod +x "$bin_path"
-    fi
-
-    # Create systemd service
-    log "Creating systemd service..."
-    cat >/etc/systemd/system/slipstream-client.service <<EOF
+  # Create systemd service
+  log "Creating systemd service..."
+  cat >/etc/systemd/system/slipstream-client.service <<EOF
 [Unit]
 Description=Slipstream DNS Tunnel Client
 After=network.target
@@ -651,17 +542,15 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable slipstream-client
-    systemctl start slipstream-client
-    log "Started slipstream-client service"
-  fi
+  systemctl daemon-reload
+  systemctl enable slipstream-client
+  systemctl start slipstream-client
+  log "Started slipstream-client service"
 
   # Save config
   cat >"$CONFIG_FILE" <<EOF
 DOMAIN=$domain
 MODE=client
-RUNTIME=$runtime
 CURRENT_SERVER=$best_server
 PORT=$port
 EOF
@@ -675,18 +564,13 @@ EOF
   echo ""
   echo -e "${GREEN}=== Client Ready ===${NC}"
   echo ""
-  echo "Runtime: $runtime"
   echo "Tunnel: 127.0.0.1:$port"
   echo "DNS server: $best_server"
   echo ""
   echo "Commands:"
   echo "  slipstream-tunnel status"
   echo "  slipstream-tunnel health"
-  if [[ "$runtime" == "docker" ]]; then
-    echo "  docker logs -f slipstream-client"
-  else
-    echo "  journalctl -u slipstream-client -f"
-  fi
+  echo "  journalctl -u slipstream-client -f"
   echo ""
   echo "Verified servers saved to: $SERVERS_FILE"
 }
@@ -737,25 +621,8 @@ cmd_health() {
       sed -i "s/CURRENT_SERVER=.*/CURRENT_SERVER=$best_server/" "$CONFIG_FILE"
 
       # Restart client with new server
-      if [[ "${RUNTIME:-docker}" == "docker" ]]; then
-        # Docker mode
-        docker rm -f slipstream-client 2>/dev/null || true
-        if docker run -d --restart=unless-stopped \
-          --name slipstream-client \
-          --network host \
-          "$SLIPSTREAM_DOCKER_IMAGE" \
-          slipstream-client \
-          --resolver "${best_server}:53" \
-          --domain "$DOMAIN" \
-          --tcp-listen-port "${PORT:-7000}"; then
-          echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
-        else
-          echo "[$timestamp] ERROR: container restart failed" >>"$HEALTH_LOG"
-        fi
-      else
-        # Binary mode - update systemd service and restart
-        local bin_path="/usr/local/bin/slipstream-client"
-        cat >/etc/systemd/system/slipstream-client.service <<EOF
+      local bin_path="/usr/local/bin/slipstream-client"
+      cat >/etc/systemd/system/slipstream-client.service <<EOF
 [Unit]
 Description=Slipstream DNS Tunnel Client
 After=network.target
@@ -772,12 +639,11 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        if systemctl restart slipstream-client; then
-          echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
-        else
-          echo "[$timestamp] ERROR: service restart failed" >>"$HEALTH_LOG"
-        fi
+      systemctl daemon-reload
+      if systemctl restart slipstream-client; then
+        echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
+      else
+        echo "[$timestamp] ERROR: service restart failed" >>"$HEALTH_LOG"
       fi
     else
       echo "No better server found"
@@ -853,18 +719,10 @@ cmd_logs() {
 
   local service_name="slipstream-${MODE:-client}"
 
-  if [[ "${RUNTIME:-binary}" == "docker" ]]; then
-    if $follow; then
-      docker logs -f "$service_name"
-    else
-      docker logs --tail 100 "$service_name"
-    fi
+  if $follow; then
+    journalctl -u "$service_name" -f
   else
-    if $follow; then
-      journalctl -u "$service_name" -f
-    else
-      journalctl -u "$service_name" -n 100 --no-pager
-    fi
+    journalctl -u "$service_name" -n 100 --no-pager
   fi
 }
 
@@ -878,7 +736,6 @@ cmd_status() {
   if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
     echo "Mode: ${MODE:-unknown}"
-    echo "Runtime: ${RUNTIME:-docker}"
     echo "Domain: $DOMAIN"
     echo "Port: ${PORT:-7000}"
     [[ -n "${CURRENT_SERVER:-}" ]] && echo "Current DNS: $CURRENT_SERVER"
@@ -889,19 +746,14 @@ cmd_status() {
 
   echo ""
   echo "Services:"
-  if [[ "${RUNTIME:-docker}" == "docker" ]]; then
-    docker ps --filter "name=slipstream" --format "  {{.Names}}: {{.Status}}" 2>/dev/null || echo "  None"
+  if [[ "${MODE:-}" == "server" ]]; then
+    local status
+    status=$(systemctl is-active slipstream-server 2>/dev/null || echo "not running")
+    echo "  slipstream-server: $status"
   else
-    # Binary mode - check systemd services
-    if [[ "${MODE:-}" == "server" ]]; then
-      local status
-      status=$(systemctl is-active slipstream-server 2>/dev/null || echo "not running")
-      echo "  slipstream-server: $status"
-    else
-      local status
-      status=$(systemctl is-active slipstream-client 2>/dev/null || echo "not running")
-      echo "  slipstream-client: $status"
-    fi
+    local status
+    status=$(systemctl is-active slipstream-client 2>/dev/null || echo "not running")
+    echo "  slipstream-client: $status"
   fi
 
   # Health timer only relevant for client
@@ -928,21 +780,7 @@ cmd_remove() {
   need_root
   log "=== Removing DNS Tunnel ==="
 
-  # Stop and remove Docker containers (if any)
-  if command -v docker &>/dev/null; then
-    if docker ps -a --format '{{.Names}}' | grep -q slipstream; then
-      log "Stopping slipstream Docker containers..."
-      docker rm -f slipstream-server slipstream-client 2>/dev/null || true
-    fi
-
-    # Remove Docker image
-    if docker images bashsiz/slipstream-rust -q 2>/dev/null | grep -q .; then
-      log "Removing slipstream Docker image..."
-      docker rmi bashsiz/slipstream-rust:latest 2>/dev/null || true
-    fi
-  fi
-
-  # Stop and remove systemd services (binary mode)
+  # Stop and remove systemd services
   if [[ -f /etc/systemd/system/slipstream-server.service ]]; then
     log "Stopping slipstream-server service..."
     systemctl stop slipstream-server 2>/dev/null || true
@@ -995,9 +833,6 @@ cmd_remove() {
     log "Removing certificates..."
     rm -rf "$CERT_DIR"
   fi
-
-  # Remove client tarball from home
-  [[ -f ~/slipstream-client.tar.gz ]] && rm -f ~/slipstream-client.tar.gz
 
   # Ask about systemd-resolved
   if ! systemctl is-active systemd-resolved &>/dev/null; then
