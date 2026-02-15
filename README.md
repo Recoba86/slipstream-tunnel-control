@@ -67,7 +67,6 @@ slipstream-tunnel remove    # Remove everything
 | `--dns-file`   | Custom DNS server list (skips subnet scan)|
 | `--dnscan`     | Path to dnscan tarball (offline mode)     |
 | `--slipstream` | Path to slipstream binary (offline mode)  |
-| `--docker`     | Use Docker instead of binary              |
 
 ## How It Works
 
@@ -130,13 +129,9 @@ After running the script on both server and client:
 
 **Client: "No DNS servers passed verification"**
 
-- Is the server running?
-  - Binary: `systemctl status slipstream-server`
-  - Docker: `docker ps | grep slipstream`
+- Is the server running? `systemctl status slipstream-server`
 - Is port 53 open on server?
-- Check server logs:
-  - Binary: `journalctl -u slipstream-server -f`
-  - Docker: `docker logs slipstream-server -f`
+- Check server logs: `journalctl -u slipstream-server -f`
 
 **Client: "Cannot download"**
 

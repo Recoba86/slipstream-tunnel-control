@@ -83,7 +83,6 @@ slipstream-tunnel remove    # حذف همه چیز
 | `--dns-file` | لیست سرورهای DNS (بدون اسکن subnet) |
 | `--dnscan` | مسیر فایل dnscan (حالت آفلاین) |
 | `--slipstream` | مسیر باینری slipstream (حالت آفلاین) |
-| `--docker` | استفاده از Docker به جای باینری |
 
 ## نحوه کار
 
@@ -148,13 +147,9 @@ slipstream-tunnel remove    # حذف همه چیز
 - تأیید با: `dig NS t.example.com`
 
 **کلاینت: "No DNS servers passed verification"**
-- آیا سرور در حال اجراست؟
-  - باینری: `systemctl status slipstream-server`
-  - داکر: `docker ps | grep slipstream`
+- آیا سرور در حال اجراست؟ `systemctl status slipstream-server`
 - آیا پورت 53 روی سرور باز است؟
-- بررسی لاگ سرور:
-  - باینری: `journalctl -u slipstream-server -f`
-  - داکر: `docker logs slipstream-server -f`
+- بررسی لاگ سرور: `journalctl -u slipstream-server -f`
 
 **کلاینت: "Cannot download"**
 - شبکه بسته است
