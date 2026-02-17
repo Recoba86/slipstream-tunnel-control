@@ -47,6 +47,7 @@ Commands:
   health              Check DNS server and switch if slow
   rescan              Run manual DNS rescan and switch to best server
   dashboard           Show client tunnel dashboard
+  servers             Show verified DNS IPs with live latency checks
   menu                Open interactive client monitor menu
   m                   Short alias for menu
   status              Show current status
@@ -68,6 +69,7 @@ Examples:
   slipstream-tunnel client --domain t.example.com
   slipstream-tunnel client --dns-file /tmp/dns-servers.txt
   slipstream-tunnel rescan
+  slipstream-tunnel servers
   slipstream-tunnel menu
   sst
 EOF
@@ -900,6 +902,7 @@ EOF
   echo "  slipstream-tunnel health"
   echo "  slipstream-tunnel rescan"
   echo "  slipstream-tunnel dashboard"
+  echo "  slipstream-tunnel servers"
   echo "  slipstream-tunnel menu"
   echo "  sst"
   echo "  journalctl -u slipstream-client -f"
@@ -1023,6 +1026,7 @@ cmd_rescan() {
   systemctl restart slipstream-client
 
   log "Switched to best DNS server: $best_server (${best_latency}ms)"
+  cmd_servers
   cmd_dashboard
 }
 
@@ -1072,6 +1076,48 @@ cmd_dashboard() {
   fi
 }
 
+ping_rtt_ms() {
+  local server="$1"
+  command -v ping &>/dev/null || {
+    echo "n/a"
+    return
+  }
+
+  local out rtt
+  if out=$(ping -n -c 1 -W 1 "$server" 2>/dev/null); then
+    rtt=$(echo "$out" | awk -F'time=' '/time=/{print $2}' | awk '{print $1}' | head -1)
+    [[ -n "$rtt" ]] && {
+      echo "$rtt"
+      return
+    }
+  fi
+  echo "timeout"
+}
+
+cmd_servers() {
+  check_dependencies dig
+  load_config_or_error
+  [[ "${MODE:-}" == "client" ]] || error "Server list is available only in client mode"
+  [[ -s "$SERVERS_FILE" ]] || error "No verified DNS server list found"
+
+  echo "=== Verified DNS Servers (Live Check) ==="
+  printf "%-16s %-12s %-12s %s\n" "IP" "Ping(ms)" "DNS(ms)" "Status"
+
+  local server ping_ms dns_ms status
+  while IFS= read -r server; do
+    [[ -z "$server" ]] && continue
+    is_valid_ipv4 "$server" || continue
+    ping_ms=$(ping_rtt_ms "$server")
+    dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
+    if [[ "$dns_ms" -lt 1000 ]]; then
+      status="OK"
+    else
+      status="SLOW/FAIL"
+    fi
+    printf "%-16s %-12s %-12s %s\n" "$server" "$ping_ms" "$dns_ms" "$status"
+  done <"$SERVERS_FILE"
+}
+
 cmd_menu() {
   need_root
   load_config_or_error
@@ -1086,6 +1132,7 @@ cmd_menu() {
     echo "2) Run full DNS rescan now"
     echo "3) Show status"
     echo "4) Follow client logs"
+    echo "5) Show verified DNS IP list (live ping + DNS latency)"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -1094,6 +1141,7 @@ cmd_menu() {
     2) cmd_rescan ;;
     3) cmd_status ;;
     4) cmd_logs -f ;;
+    5) cmd_servers ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
@@ -1317,6 +1365,7 @@ main() {
   health) cmd_health ;;
   rescan) cmd_rescan ;;
   dashboard) cmd_dashboard ;;
+  servers) cmd_servers ;;
   menu | m) cmd_menu ;;
   status) cmd_status ;;
   logs)

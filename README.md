@@ -57,6 +57,7 @@ slipstream-tunnel logs      # View logs (add -f to follow)
 slipstream-tunnel health    # Check DNS and switch if slow
 slipstream-tunnel rescan    # Manual DNS rescan + switch best server
 slipstream-tunnel dashboard # Small client dashboard
+slipstream-tunnel servers   # Full verified DNS list (live ping + DNS latency)
 slipstream-tunnel menu      # Interactive monitoring menu
 sst                         # Short command for client menu
 slipstream-tunnel remove    # Remove everything

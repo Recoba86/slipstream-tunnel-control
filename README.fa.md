@@ -71,6 +71,7 @@ slipstream-tunnel logs      # مشاهده لاگ (با -f برای دنبال �
 slipstream-tunnel health    # بررسی DNS و تعویض اگر کند باشد
 slipstream-tunnel rescan    # اسکن دستی DNS و تعویض به بهترین
 slipstream-tunnel dashboard # داشبورد کوچک کلاینت
+slipstream-tunnel servers   # نمایش کامل DNSهای تاییدشده با ping و latency
 slipstream-tunnel menu      # منوی مانیتورینگ دستی
 sst                         # دستور کوتاه برای باز کردن منوی کلاینت
 slipstream-tunnel remove    # حذف همه چیز
