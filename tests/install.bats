@@ -73,3 +73,8 @@ setup() {
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
+
+@test "password prompt helper returns clean single-line value for command substitution" {
+  run bash -lc "source '$SCRIPT'; out=\$(prompt_password_twice 'Test password' <<< \$'secret123\nsecret123\n'); [[ \"\$out\" == 'secret123' ]]"
+  [ "$status" -eq 0 ]
+}

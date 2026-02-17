@@ -466,15 +466,15 @@ prompt_password_twice() {
   local password confirm
   while true; do
     read -r -s -p "${label}: " password
-    echo ""
+    echo "" >&2
     [[ -n "$password" ]] || {
-      warn "Password cannot be empty"
+      echo -e "${YELLOW}[!]${NC} Password cannot be empty" >&2
       continue
     }
     read -r -s -p "Confirm ${label}: " confirm
-    echo ""
+    echo "" >&2
     [[ "$password" == "$confirm" ]] || {
-      warn "Passwords do not match"
+      echo -e "${YELLOW}[!]${NC} Passwords do not match" >&2
       continue
     }
     printf "%s\n" "$password"
