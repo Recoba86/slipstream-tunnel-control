@@ -2032,6 +2032,7 @@ cmd_uninstall() {
 cmd_edit_client() {
   need_root
   check_dependencies systemctl
+  install_self
   load_config_or_error
   [[ "${MODE:-}" == "client" ]] || error "Client edit is available only in client mode"
 
@@ -2130,6 +2131,7 @@ cmd_edit_client() {
 cmd_edit_server() {
   need_root
   check_dependencies systemctl openssl
+  install_self
   load_config_or_error
   [[ "${MODE:-}" == "server" ]] || error "Server edit is available only in server mode"
 
