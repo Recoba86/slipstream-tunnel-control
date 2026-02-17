@@ -1820,7 +1820,7 @@ prompt_scan_settings_for_profile() {
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-50}"
-  local input
+  local input=""
 
   [[ "$scan_source" == "generated" || "$scan_source" == "file" ]] || scan_source="generated"
   [[ -n "$scan_file" ]] || scan_file="$fallback_dns_file"
@@ -3355,7 +3355,7 @@ cmd_edit_client() {
   local new_ssh_remote_port="${SSH_REMOTE_APP_PORT:-2053}"
   local new_ssh_transport_port="${SSH_TRANSPORT_PORT:-17070}"
   local new_ssh_pass_plain=""
-  local input
+  local input=""
 
   echo "=== Edit Client Settings ==="
   read -r -p "Domain [$new_domain]: " input
