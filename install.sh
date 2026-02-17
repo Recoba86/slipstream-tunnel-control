@@ -556,11 +556,15 @@ prompt_instance_resolver_or_error() {
     local i=1
     for candidate_resolver in "${candidates[@]}"; do
       if command -v dig &>/dev/null; then
-        latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
-        if [[ "$latency" -lt 1000 ]]; then
-          printf "  %d) %s (dns=%sms, reachable)\n" "$i" "$candidate_resolver" "$latency"
+        if resolver_answers_dns_queries "$candidate_resolver"; then
+          latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
+          if [[ "$latency" -lt 1000 ]]; then
+            printf "  %d) %s (dns=reachable, tunnel=%sms)\n" "$i" "$candidate_resolver" "$latency"
+          else
+            printf "  %d) %s (dns=reachable, tunnel=no-answer)\n" "$i" "$candidate_resolver"
+          fi
         else
-          printf "  %d) %s (dns=fail)\n" "$i" "$candidate_resolver"
+          printf "  %d) %s (dns=unreachable)\n" "$i" "$candidate_resolver"
         fi
       else
         printf "  %d) %s\n" "$i" "$candidate_resolver"
@@ -587,12 +591,9 @@ prompt_instance_resolver_or_error() {
         candidate_resolver="${candidates[$((choice - 1))]}"
       fi
 
-      if command -v dig &>/dev/null; then
-        latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
-        if [[ "$latency" -ge 1000 ]]; then
-          warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Choose another resolver."
-          continue
-        fi
+      if command -v dig &>/dev/null && ! resolver_answers_dns_queries "$candidate_resolver"; then
+        warn "Resolver $candidate_resolver is unreachable for DNS queries. Choose another resolver."
+        continue
       fi
       printf -v "$out_var" '%s' "$candidate_resolver"
       return 0
@@ -602,12 +603,9 @@ prompt_instance_resolver_or_error() {
   while true; do
     prompt_read candidate_resolver "DNS resolver IP (server IP): "
     validate_ipv4_or_error "$candidate_resolver"
-    if command -v dig &>/dev/null; then
-      latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
-      if [[ "$latency" -ge 1000 ]]; then
-        warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Try another resolver."
-        continue
-      fi
+    if command -v dig &>/dev/null && ! resolver_answers_dns_queries "$candidate_resolver"; then
+      warn "Resolver $candidate_resolver is unreachable for DNS queries. Try another resolver."
+      continue
     fi
     printf -v "$out_var" '%s' "$candidate_resolver"
     return 0
@@ -3843,6 +3841,12 @@ test_dns_latency() {
   else
     echo "9999"
   fi
+}
+
+resolver_answers_dns_queries() {
+  local server="$1"
+  command -v dig &>/dev/null || return 0
+  dig +short +time=2 +tries=1 "@$server" . NS &>/dev/null
 }
 
 setup_health_timer_named() {

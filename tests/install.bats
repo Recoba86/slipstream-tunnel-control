@@ -141,3 +141,8 @@ setup() {
   run bash -lc "source '$SCRIPT'; tmp=\$(mktemp -d); TUNNEL_DIR=\"\$tmp\"; CONFIG_FILE=\"\$tmp/config\"; SERVERS_FILE=\"\$tmp/servers.txt\"; INSTANCES_DIR=\"\$tmp/instances\"; mkdir -p \"\$INSTANCES_DIR/a\" \"\$INSTANCES_DIR/b\"; printf '%s\n' 'CURRENT_SERVER=2.2.2.2' >\"\$CONFIG_FILE\"; printf '%s\n' '1.1.1.1' '2.2.2.2' 'bad.ip' >\"\$SERVERS_FILE\"; printf '%s\n' 'CURRENT_SERVER=3.3.3.3' >\"\$INSTANCES_DIR/a/config\"; printf '%s\n' 'CURRENT_SERVER=1.1.1.1' >\"\$INSTANCES_DIR/b/config\"; out=\$(collect_known_resolver_candidates | tr '\n' ' '); [[ \"\$out\" == '2.2.2.2 1.1.1.1 3.3.3.3 ' ]]"
   [ "$status" -eq 0 ]
 }
+
+@test "resolver reachability check accepts reachable DNS and rejects unreachable DNS" {
+  run bash -lc "source '$SCRIPT'; dig(){ [[ \"\$*\" == *'@1.1.1.1'* ]] && return 0 || return 1; }; resolver_answers_dns_queries '1.1.1.1'; ! resolver_answers_dns_queries '2.2.2.2'"
+  [ "$status" -eq 0 ]
+}
