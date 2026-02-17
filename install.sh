@@ -1302,6 +1302,15 @@ cmd_server() {
   fi
   log "Continuing with setup..."
 
+  # Upgrade path: existing slipstream-server may already be bound to :53.
+  # Stop it before conflict checks so in-place upgrades do not fail.
+  if systemctl list-unit-files slipstream-server.service &>/dev/null; then
+    if systemctl is-active --quiet slipstream-server; then
+      log "Stopping existing slipstream-server to free port 53 for upgrade..."
+      systemctl stop slipstream-server 2>/dev/null || true
+    fi
+  fi
+
   if port_53_in_use; then
     auto_fix_port_53_conflict || error "Port 53 is still busy. Stop the remaining listener(s) shown above and run again."
   fi
@@ -1332,7 +1341,7 @@ cmd_server() {
     slipstream_target_port="$ssh_backend_port"
   fi
 
-  # Stop existing service
+  # Ensure service is stopped before replacing binary/service config.
   systemctl stop slipstream-server 2>/dev/null || true
 
   if [[ -n "$slipstream_path" ]]; then
