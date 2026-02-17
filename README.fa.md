@@ -63,6 +63,8 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 
 از [فورک slipstream-rust](https://github.com/nightowlnerd/slipstream-rust) با رفع باگ‌های مصرف CPU و قطع اتصال استفاده می‌کند. ریپوی اصلی دیگر فعال نیست.
 
+برای تست هسته آزمایشی هم می‌توانید `--core plus` بزنید (دانلود از [Fox-Fig/slipstream-rust-plus-deploy](https://github.com/Fox-Fig/slipstream-rust-plus-deploy)). حالت پیش‌فرض همچنان `nightowl` است.
+
 ## دستورات
 
 </div>
@@ -105,6 +107,7 @@ slipstream-tunnel remove    # حذف همه چیز
 |-------|-------|
 | `--domain` | دامنه تونل (مثلاً t.example.com) |
 | `--port` | سرور: پورت هدف / کلاینت: پورت شنود |
+| `--core` | منبع هسته: `nightowl` (پیش‌فرض) یا `plus` (آزمایشی) |
 | `--dns-file` | لیست سرورهای DNS (بدون اسکن subnet) |
 | `--dnscan` | مسیر فایل dnscan (حالت آفلاین) |
 | `--slipstream` | مسیر باینری slipstream (حالت آفلاین) |
@@ -116,6 +119,13 @@ slipstream-tunnel remove    # حذف همه چیز
 | `--ssh-pass` | کلاینت: رمز SSH برای auth |
 
 ## نحوه کار
+
+برای A/B تست در برنچ/محیط جدا:
+
+```bash
+slipstream-tunnel server --core plus --domain t.example.com
+slipstream-tunnel client --core plus --domain t.example.com
+```
 
 ### راه‌اندازی سرور
 
@@ -213,6 +223,8 @@ sysctl net.core.default_qdisc
 - از حالت آفلاین با `--dnscan` و `--slipstream` استفاده کنید
 - باینری‌ها را دانلود کنید:
   - https://github.com/nightowlnerd/dnscan/releases
+  - https://github.com/nightowlnerd/slipstream-rust/releases
+  - https://github.com/Fox-Fig/slipstream-rust-plus-deploy/releases
   - https://github.com/nightowlnerd/slipstream-rust/releases
 
 </div>

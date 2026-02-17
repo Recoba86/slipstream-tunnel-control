@@ -5,8 +5,13 @@ set -euo pipefail
 # =============================================================================
 # Release source configuration (pinned versions)
 # =============================================================================
-SLIPSTREAM_REPO="nightowlnerd/slipstream-rust"
-SLIPSTREAM_VERSION="${SLIPSTREAM_VERSION:-v0.1.1}"
+SLIPSTREAM_CORE="${SLIPSTREAM_CORE:-nightowl}"
+SLIPSTREAM_REPO_OVERRIDE="${SLIPSTREAM_REPO:-}"
+SLIPSTREAM_VERSION_OVERRIDE="${SLIPSTREAM_VERSION:-}"
+SLIPSTREAM_ASSET_LAYOUT_OVERRIDE="${SLIPSTREAM_ASSET_LAYOUT:-}"
+SLIPSTREAM_REPO=""
+SLIPSTREAM_VERSION=""
+SLIPSTREAM_ASSET_LAYOUT=""
 DNSCAN_REPO="nightowlnerd/dnscan"
 DNSCAN_VERSION="${DNSCAN_VERSION:-v1.4.0}"
 SCRIPT_REPO="${SCRIPT_REPO:-Recoba86/slipstream-tunnel-control}"
@@ -87,6 +92,7 @@ Options:
   --domain <domain>   Tunnel domain (e.g., t.example.com)
   --port <port>       Server: target port (default: 2053)
                       Client: listen port (default: 7000)
+  --core <name>       Slipstream core source: nightowl (default) or plus
   --slipstream <path> Path to slipstream binary (offline)
   --dnscan <path>     Path to dnscan tarball (client offline install)
   --dns-file <path>   Custom DNS server list (skips subnet scan)
@@ -131,6 +137,74 @@ detect_os() {
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   [[ "$os" == "linux" ]] || error "Unsupported OS: $os (Linux only)"
   echo "linux"
+}
+
+set_slipstream_source() {
+  local core="${1:-nightowl}"
+  local default_repo default_version default_layout
+
+  case "$core" in
+  nightowl)
+    default_repo="nightowlnerd/slipstream-rust"
+    default_version="v0.1.1"
+    default_layout="tarball"
+    ;;
+  plus)
+    default_repo="Fox-Fig/slipstream-rust-plus-deploy"
+    default_version="a2db384"
+    default_layout="binary"
+    ;;
+  *)
+    error "Unknown core '$core'. Valid values: nightowl, plus"
+    ;;
+  esac
+
+  SLIPSTREAM_CORE="$core"
+  SLIPSTREAM_REPO="${SLIPSTREAM_REPO_OVERRIDE:-$default_repo}"
+  SLIPSTREAM_VERSION="${SLIPSTREAM_VERSION_OVERRIDE:-$default_version}"
+  SLIPSTREAM_ASSET_LAYOUT="${SLIPSTREAM_ASSET_LAYOUT_OVERRIDE:-$default_layout}"
+}
+
+slipstream_arch_token() {
+  local arch="$1"
+  case "$SLIPSTREAM_ASSET_LAYOUT" in
+  tarball)
+    case "$arch" in
+    x86_64 | arm64) echo "$arch" ;;
+    *) error "Unsupported architecture for tarball layout: $arch" ;;
+    esac
+    ;;
+  binary)
+    case "$arch" in
+    x86_64) echo "amd64" ;;
+    arm64) echo "arm64" ;;
+    *) error "Unsupported architecture for binary layout: $arch" ;;
+    esac
+    ;;
+  *)
+    error "Unknown SLIPSTREAM_ASSET_LAYOUT: $SLIPSTREAM_ASSET_LAYOUT"
+    ;;
+  esac
+}
+
+slipstream_asset_name() {
+  local component="$1" arch="$2" token
+  token=$(slipstream_arch_token "$arch")
+  case "$SLIPSTREAM_ASSET_LAYOUT" in
+  tarball)
+    echo "slipstream-linux-${token}.tar.gz"
+    ;;
+  binary)
+    case "$component" in
+    server) echo "slipstream-server-linux-${token}" ;;
+    client) echo "slipstream-client-linux-${token}" ;;
+    *) error "Unknown slipstream component: $component" ;;
+    esac
+    ;;
+  *)
+    error "Unknown SLIPSTREAM_ASSET_LAYOUT: $SLIPSTREAM_ASSET_LAYOUT"
+    ;;
+  esac
 }
 
 check_dependencies() {
@@ -380,6 +454,56 @@ download_release_asset_verified() {
 
   actual_sha=$(sha256_of_file "$output")
   [[ "$actual_sha" == "$expected_sha" ]] || return 1
+}
+
+download_slipstream_component() {
+  local component="$1" destination="$2" arch="$3"
+  local asset
+  asset=$(slipstream_asset_name "$component" "$arch")
+
+  case "$SLIPSTREAM_ASSET_LAYOUT" in
+  tarball)
+    local tmp_tar tmp_dir binary_name
+    tmp_tar=$(mktemp /tmp/slipstream.XXXXXX.tar.gz)
+    tmp_dir=$(mktemp -d /tmp/slipstream.XXXXXX)
+    binary_name="slipstream-${component}"
+    if download_release_asset_verified "$SLIPSTREAM_REPO" "$SLIPSTREAM_VERSION" "$asset" "$tmp_tar"; then
+      tar xzf "$tmp_tar" -C "$tmp_dir" "$binary_name" || {
+        rm -f "$tmp_tar"
+        rm -rf "$tmp_dir"
+        return 1
+      }
+      install -m 0755 "$tmp_dir/$binary_name" "$destination" || {
+        rm -f "$tmp_tar"
+        rm -rf "$tmp_dir"
+        return 1
+      }
+      rm -f "$tmp_tar"
+      rm -rf "$tmp_dir"
+      return 0
+    fi
+    rm -f "$tmp_tar"
+    rm -rf "$tmp_dir"
+    return 1
+    ;;
+  binary)
+    local tmp_bin
+    tmp_bin=$(mktemp /tmp/slipstream.XXXXXX.bin)
+    if download_release_asset_verified "$SLIPSTREAM_REPO" "$SLIPSTREAM_VERSION" "$asset" "$tmp_bin"; then
+      install -m 0755 "$tmp_bin" "$destination" || {
+        rm -f "$tmp_bin"
+        return 1
+      }
+      rm -f "$tmp_bin"
+      return 0
+    fi
+    rm -f "$tmp_bin"
+    return 1
+    ;;
+  *)
+    error "Unknown SLIPSTREAM_ASSET_LAYOUT: $SLIPSTREAM_ASSET_LAYOUT"
+    ;;
+  esac
 }
 
 ensure_service_user() {
@@ -1034,6 +1158,7 @@ EOF
 cmd_server() {
   need_root
   check_dependencies curl tar systemctl openssl awk sed grep head tr sort
+  local slipstream_core="$SLIPSTREAM_CORE"
   local domain="" port="2053" slipstream_path="" manage_resolver=false
   local enable_ssh_auth=false ssh_backend_port="22"
 
@@ -1047,6 +1172,11 @@ cmd_server() {
     --port)
       require_flag_value "$1" "${2:-}"
       port="$2"
+      shift 2
+      ;;
+    --core)
+      require_flag_value "$1" "${2:-}"
+      slipstream_core="$2"
       shift 2
       ;;
     --slipstream)
@@ -1077,11 +1207,13 @@ cmd_server() {
     esac
   done
 
+  set_slipstream_source "$slipstream_core"
   validate_port_or_error "$port"
   validate_port_or_error "$ssh_backend_port"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
 
   log "=== Slipstream Server Setup ==="
+  log "Core source: ${SLIPSTREAM_CORE} (${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION}, layout=${SLIPSTREAM_ASSET_LAYOUT})"
   enable_bbr_if_possible
 
   # Get server IP with failover and validation
@@ -1209,28 +1341,23 @@ cmd_server() {
     warn "Local slipstream binary was not checksum-verified"
   else
     log "Downloading slipstream-server..."
-    local slipstream_asset="slipstream-linux-${arch}.tar.gz"
-    local tmp_tar tmp_dir
-    tmp_tar=$(mktemp /tmp/slipstream.XXXXXX.tar.gz)
-    tmp_dir=$(mktemp -d /tmp/slipstream.XXXXXX)
-    if download_release_asset_verified "$SLIPSTREAM_REPO" "$SLIPSTREAM_VERSION" "$slipstream_asset" "$tmp_tar"; then
-      tar xzf "$tmp_tar" -C "$tmp_dir" slipstream-server
-      install -m 0755 "$tmp_dir/slipstream-server" "$bin_path"
+    local slipstream_asset
+    slipstream_asset=$(slipstream_asset_name "server" "$arch")
+    if download_slipstream_component "server" "$bin_path" "$arch"; then
+      :
     else
       warn "Automatic download failed for ${slipstream_asset}"
+      echo ""
+      echo "Failed URL:"
+      echo "  https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_VERSION}/${slipstream_asset}"
+      echo ""
       echo "Provide local slipstream-server binary path (or Ctrl+C to abort):"
       read -e -r -p "Path: " slipstream_path
       [[ -n "$slipstream_path" ]] || error "No local binary path provided"
       cp "$slipstream_path" "$bin_path"
       chmod +x "$bin_path"
       warn "Local slipstream binary was not checksum-verified"
-      rm -f "$tmp_tar"
-      rm -rf "$tmp_dir"
-      tmp_tar=""
-      tmp_dir=""
     fi
-    [[ -n "${tmp_tar:-}" ]] && rm -f "$tmp_tar"
-    [[ -n "${tmp_dir:-}" ]] && rm -rf "$tmp_dir"
   fi
   chmod +x "$bin_path"
 
@@ -1244,11 +1371,15 @@ cmd_server() {
 
   # Save config
   mkdir -p "$TUNNEL_DIR"
-  cat >"$CONFIG_FILE" <<EOF
+cat >"$CONFIG_FILE" <<EOF
 DOMAIN=$domain
 MODE=server
 PORT=$port
 MANAGE_RESOLVER=$manage_resolver
+SLIPSTREAM_CORE=$SLIPSTREAM_CORE
+SLIPSTREAM_REPO=$SLIPSTREAM_REPO
+SLIPSTREAM_VERSION=$SLIPSTREAM_VERSION
+SLIPSTREAM_ASSET_LAYOUT=$SLIPSTREAM_ASSET_LAYOUT
 SSH_AUTH_ENABLED=$enable_ssh_auth
 SSH_BACKEND_PORT=$ssh_backend_port
 EOF
@@ -1379,6 +1510,7 @@ find_best_server() {
 cmd_client() {
   need_root
   check_dependencies curl tar systemctl awk sed grep head wc dig
+  local slipstream_core="$SLIPSTREAM_CORE"
   local domain="" dnscan_path="" slipstream_path="" port="7000" dns_file=""
   local port_from_flag=false
   local ssh_auth_client=false ssh_user="" ssh_pass="" ssh_remote_port="2053" ssh_transport_port="17070"
@@ -1393,6 +1525,11 @@ cmd_client() {
     --dnscan)
       require_flag_value "$1" "${2:-}"
       dnscan_path="$2"
+      shift 2
+      ;;
+    --core)
+      require_flag_value "$1" "${2:-}"
+      slipstream_core="$2"
       shift 2
       ;;
     --slipstream)
@@ -1436,10 +1573,12 @@ cmd_client() {
     esac
   done
 
+  set_slipstream_source "$slipstream_core"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
   [[ -n "$dns_file" ]] && validate_dns_file_or_error "$dns_file"
 
   log "=== Slipstream Client Setup ==="
+  log "Core source: ${SLIPSTREAM_CORE} (${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION}, layout=${SLIPSTREAM_ASSET_LAYOUT})"
   enable_bbr_if_possible
 
   ensure_service_user
@@ -1526,7 +1665,8 @@ cmd_client() {
   # Get slipstream binary (required for --verify)
   local slipstream_bin="$TUNNEL_DIR/slipstream-client"
   local installed_bin="$SLIPSTREAM_CLIENT_BIN"
-  local slipstream_asset="slipstream-linux-${arch}.tar.gz"
+  local slipstream_asset
+  slipstream_asset=$(slipstream_asset_name "client" "$arch")
 
   if [[ -x "$slipstream_bin" ]]; then
     # Use cached binary
@@ -1543,21 +1683,13 @@ cmd_client() {
     warn "Local slipstream binary was not checksum-verified"
   else
     log "Downloading slipstream-client..."
-    local tmp_slipstream tmp_extract_dir
-    tmp_slipstream=$(mktemp /tmp/slipstream.XXXXXX.tar.gz)
-    tmp_extract_dir=$(mktemp -d /tmp/slipstream.XXXXXX)
-    if download_release_asset_verified "$SLIPSTREAM_REPO" "$SLIPSTREAM_VERSION" "$slipstream_asset" "$tmp_slipstream"; then
-      tar xzf "$tmp_slipstream" -C "$tmp_extract_dir" slipstream-client
-      mv "$tmp_extract_dir/slipstream-client" "$slipstream_bin"
-      rm -f "$tmp_slipstream"
-      rm -rf "$tmp_extract_dir"
+    if download_slipstream_component "client" "$slipstream_bin" "$arch"; then
+      :
     else
-      rm -f "$tmp_slipstream"
-      rm -rf "$tmp_extract_dir"
       echo ""
       warn "Cannot download slipstream-client (network blocked?)"
       echo ""
-      echo "Transfer tarball from a non-blocked network:"
+      echo "Transfer this asset from a non-blocked network:"
       echo "  https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_VERSION}/${slipstream_asset}"
       echo ""
       read -e -p "Path to slipstream-client binary: " slipstream_path
@@ -1725,11 +1857,15 @@ cmd_client() {
   fi
 
   # Save config
-  cat >"$CONFIG_FILE" <<EOF
+cat >"$CONFIG_FILE" <<EOF
 DOMAIN=$domain
 MODE=client
 CURRENT_SERVER=$best_server
 PORT=$port
+SLIPSTREAM_CORE=$SLIPSTREAM_CORE
+SLIPSTREAM_REPO=$SLIPSTREAM_REPO
+SLIPSTREAM_VERSION=$SLIPSTREAM_VERSION
+SLIPSTREAM_ASSET_LAYOUT=$SLIPSTREAM_ASSET_LAYOUT
 SCAN_SOURCE=$scan_source
 SCAN_DNS_FILE=$scan_file
 SCAN_COUNTRY=$scan_country
@@ -2883,6 +3019,10 @@ cmd_status() {
     echo "Mode: ${MODE:-unknown}"
     echo "Domain: $DOMAIN"
     echo "Port: ${PORT:-7000}"
+    [[ -n "${SLIPSTREAM_CORE:-}" ]] && echo "Core: ${SLIPSTREAM_CORE}"
+    if [[ -n "${SLIPSTREAM_REPO:-}" && -n "${SLIPSTREAM_VERSION:-}" ]]; then
+      echo "Core source: ${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION}"
+    fi
     [[ -n "${CURRENT_SERVER:-}" ]] && echo "Current DNS: $CURRENT_SERVER"
     if [[ "${MODE:-}" == "server" ]]; then
       echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
@@ -3076,6 +3216,7 @@ cmd_remove() {
 # ============================================
 main() {
   [[ $# -eq 0 ]] && usage
+  set_slipstream_source "$SLIPSTREAM_CORE"
 
   case "$1" in
   server)

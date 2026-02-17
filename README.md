@@ -51,6 +51,8 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 
 Uses a [fork of slipstream-rust](https://github.com/nightowlnerd/slipstream-rust) with fixes for CPU spin and connection stall bugs. The upstream repo is no longer actively maintained.
 
+You can also test an experimental core with `--core plus` (downloads from [Fox-Fig/slipstream-rust-plus-deploy](https://github.com/Fox-Fig/slipstream-rust-plus-deploy)). Default remains `nightowl`.
+
 ## Commands
 
 ```bash
@@ -89,6 +91,7 @@ Inside `menu`, actions are grouped into compact submenus (monitoring, service, a
 | -------------- | ----------------------------------------- |
 | `--domain`     | Tunnel domain (e.g., t.example.com)       |
 | `--port`       | Server: target port / Client: listen port |
+| `--core`       | Core source: `nightowl` (default) or `plus` (experimental) |
 | `--dns-file`   | Custom DNS server list (skips subnet scan)|
 | `--dnscan`     | Path to dnscan tarball (offline mode)     |
 | `--slipstream` | Path to slipstream binary (offline mode)  |
@@ -100,6 +103,13 @@ Inside `menu`, actions are grouped into compact submenus (monitoring, service, a
 | `--ssh-pass`   | Client: SSH password for auth overlay |
 
 ## How It Works
+
+For A/B testing on a separate branch/environment:
+
+```bash
+slipstream-tunnel server --core plus --domain t.example.com
+slipstream-tunnel client --core plus --domain t.example.com
+```
 
 ### Server Setup
 
@@ -204,3 +214,4 @@ After running the script on both server and client:
 - Get binaries from:
   - https://github.com/nightowlnerd/dnscan/releases
   - https://github.com/nightowlnerd/slipstream-rust/releases
+  - https://github.com/Fox-Fig/slipstream-rust-plus-deploy/releases
