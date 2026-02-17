@@ -682,42 +682,56 @@ test_client_ssh_auth_credentials() {
   chmod 600 "$SSH_CLIENT_ENV_DIR/known_hosts"
 
   log "Testing SSH credentials through tunnel transport..."
+  local attempt max_attempts=8
   local probe_log probe_pid probe_rc=0 probe_tail=""
-  probe_log=$(mktemp /tmp/slipstream-ssh-probe.XXXXXX.log)
-  SSHPASS="$password" sshpass -e ssh -N \
-    -o ExitOnForwardFailure=yes \
-    -o ConnectTimeout=10 \
-    -o ServerAliveInterval=10 \
-    -o ServerAliveCountMax=1 \
-    -o TCPKeepAlive=yes \
-    -o NumberOfPasswordPrompts=1 \
-    -o PreferredAuthentications=password \
-    -o PubkeyAuthentication=no \
-    -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile="$SSH_CLIENT_ENV_DIR/known_hosts" \
-    -L "127.0.0.1:${local_port}:127.0.0.1:${remote_app_port}" \
-    -p "$transport_port" "${username}@127.0.0.1" >"$probe_log" 2>&1 &
-  probe_pid=$!
 
-  sleep 4
-  if kill -0 "$probe_pid" 2>/dev/null; then
-    kill "$probe_pid" 2>/dev/null || true
-    wait "$probe_pid" 2>/dev/null || true
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    probe_log=$(mktemp /tmp/slipstream-ssh-probe.XXXXXX.log)
+    SSHPASS="$password" sshpass -e ssh -N \
+      -o ExitOnForwardFailure=yes \
+      -o ConnectTimeout=10 \
+      -o ServerAliveInterval=10 \
+      -o ServerAliveCountMax=1 \
+      -o TCPKeepAlive=yes \
+      -o NumberOfPasswordPrompts=1 \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      -o StrictHostKeyChecking=accept-new \
+      -o UserKnownHostsFile="$SSH_CLIENT_ENV_DIR/known_hosts" \
+      -L "127.0.0.1:${local_port}:127.0.0.1:${remote_app_port}" \
+      -p "$transport_port" "${username}@127.0.0.1" >"$probe_log" 2>&1 &
+    probe_pid=$!
+
+    sleep 4
+    if kill -0 "$probe_pid" 2>/dev/null; then
+      kill "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+      rm -f "$probe_log"
+      log "SSH credential test passed"
+      return 0
+    fi
+
+    probe_rc=0
+    wait "$probe_pid" 2>/dev/null || probe_rc=$?
+    probe_tail=""
+    if [[ -s "$probe_log" ]]; then
+      probe_tail=$(tail -n 3 "$probe_log" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
+    fi
     rm -f "$probe_log"
-    log "SSH credential test passed"
-    return 0
-  fi
 
-  wait "$probe_pid" 2>/dev/null || probe_rc=$?
-  if [[ -s "$probe_log" ]]; then
-    probe_tail=$(tail -n 3 "$probe_log" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
-  fi
-  rm -f "$probe_log"
+    if [[ "$attempt" -lt "$max_attempts" && "$probe_tail" == *"Connection refused"* ]]; then
+      warn "SSH transport is not ready yet (attempt ${attempt}/${max_attempts}), retrying..."
+      sleep 2
+      continue
+    fi
 
-  if [[ -n "$probe_tail" ]]; then
-    error "SSH credential test failed (user/password/transport/app-port). Details: $probe_tail"
-  fi
-  error "SSH credential test failed (user/password/transport/app-port). Exit code: ${probe_rc}"
+    if [[ -n "$probe_tail" ]]; then
+      error "SSH credential test failed (user/password/transport/app-port). Details: $probe_tail"
+    fi
+    error "SSH credential test failed (user/password/transport/app-port). Exit code: ${probe_rc}"
+  done
+
+  error "SSH credential test failed after ${max_attempts} attempts (transport readiness timeout)"
 }
 
 write_ssh_auth_config() {
