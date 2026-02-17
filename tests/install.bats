@@ -26,6 +26,14 @@ setup() {
   [[ "$output" == *"watchdog            Run immediate runtime watchdog check"* ]]
   [[ "$output" == *"dashboard"* ]]
   [[ "$output" == *"servers"* ]]
+  [[ "$output" == *"instance-add"* ]]
+  [[ "$output" == *"instance-list"* ]]
+  [[ "$output" == *"instance-status"* ]]
+  [[ "$output" == *"instance-start"* ]]
+  [[ "$output" == *"instance-stop"* ]]
+  [[ "$output" == *"instance-restart"* ]]
+  [[ "$output" == *"instance-logs"* ]]
+  [[ "$output" == *"instance-del"* ]]
   [[ "$output" == *"menu"* ]]
   [[ "$output" == *"speed-profile"* ]]
   [[ "$output" == *"core-switch"* ]]
@@ -55,6 +63,14 @@ setup() {
   [ "$status" -eq 0 ]
 
   run bash -lc "source '$SCRIPT'; validate_unix_username_or_error 'Bad.Name'"
+  [ "$status" -ne 0 ]
+}
+
+@test "instance name helper accepts safe names and rejects bad names" {
+  run bash -lc "source '$SCRIPT'; validate_instance_name_or_error 'dubai_2'"
+  [ "$status" -eq 0 ]
+
+  run bash -lc "source '$SCRIPT'; validate_instance_name_or_error 'Bad.Name'"
   [ "$status" -ne 0 ]
 }
 

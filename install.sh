@@ -25,6 +25,7 @@ SST_BIN="${SST_BIN:-/usr/local/bin/sst}"
 # =============================================================================
 
 TUNNEL_DIR="$HOME/.tunnel"
+INSTANCES_DIR="$TUNNEL_DIR/instances"
 DNSCAN_DIR="$TUNNEL_DIR/dnscan"
 SERVERS_FILE="$TUNNEL_DIR/servers.txt"
 CONFIG_FILE="$TUNNEL_DIR/config"
@@ -77,6 +78,14 @@ Commands:
   rescan              Run manual DNS rescan and switch to best server
   dashboard           Show client tunnel dashboard
   servers             Show verified DNS IPs with live latency checks
+  instance-add        Add/start an extra client instance (multi-instance)
+  instance-list       List extra client instances
+  instance-status     Show one extra client instance status
+  instance-start      Start one extra client instance
+  instance-stop       Stop one extra client instance
+  instance-restart    Restart one extra client instance
+  instance-logs       View logs for one extra client instance (-f to follow)
+  instance-del        Delete one extra client instance
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
   speed-profile       Set profile: fast (SSH off) / secure (SSH on)
@@ -121,6 +130,9 @@ Examples:
   slipstream-tunnel watchdog
   slipstream-tunnel rescan
   slipstream-tunnel servers
+  slipstream-tunnel instance-add dubai
+  slipstream-tunnel instance-list
+  slipstream-tunnel instance-status dubai
   slipstream-tunnel menu
   slipstream-tunnel speed-profile fast
   slipstream-tunnel core-switch plus
@@ -431,6 +443,79 @@ validate_port_or_error() {
 validate_unix_username_or_error() {
   local username="$1"
   [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || error "Invalid username: $username"
+}
+
+validate_instance_name_or_error() {
+  local name="$1"
+  [[ "$name" =~ ^[a-z][a-z0-9_-]{0,30}$ ]] || error "Invalid instance name: $name (use: a-z, 0-9, -, _)"
+}
+
+instance_dir() {
+  local name="$1"
+  echo "$INSTANCES_DIR/$name"
+}
+
+instance_config_file() {
+  local name="$1"
+  echo "$(instance_dir "$name")/config"
+}
+
+instance_servers_file() {
+  local name="$1"
+  echo "$(instance_dir "$name")/servers.txt"
+}
+
+instance_health_log() {
+  local name="$1"
+  echo "$(instance_dir "$name")/health.log"
+}
+
+instance_client_service() {
+  local name="$1"
+  echo "slipstream-client-$name"
+}
+
+instance_health_service() {
+  local name="$1"
+  echo "tunnel-health-$name"
+}
+
+instance_health_timer() {
+  local name="$1"
+  echo "tunnel-health-$name.timer"
+}
+
+instance_watchdog_service() {
+  local name="$1"
+  echo "tunnel-watchdog-$name"
+}
+
+instance_watchdog_timer() {
+  local name="$1"
+  echo "tunnel-watchdog-$name.timer"
+}
+
+instance_watchdog_last_restart_file() {
+  local name="$1"
+  echo "$WATCHDOG_STATE_DIR/watchdog-$name.last_restart"
+}
+
+load_instance_config_or_error() {
+  local name="$1"
+  local cfg
+  cfg=$(instance_config_file "$name")
+  [[ -f "$cfg" ]] || error "No such instance: $name"
+  # shellcheck disable=SC1090
+  source "$cfg"
+}
+
+port_in_use() {
+  local port="$1"
+  if command -v ss &>/dev/null; then
+    ss -H -lnt "sport = :$port" 2>/dev/null | awk 'NF {found=1} END {exit !found}'
+  else
+    return 1
+  fi
 }
 
 validate_dns_file_or_error() {
@@ -1123,6 +1208,21 @@ stop_client_stack() {
   systemctl stop slipstream-client
 }
 
+restart_named_client_stack() {
+  local service_name="$1"
+  systemctl restart "$service_name"
+}
+
+start_named_client_stack() {
+  local service_name="$1"
+  systemctl start "$service_name"
+}
+
+stop_named_client_stack() {
+  local service_name="$1"
+  systemctl stop "$service_name"
+}
+
 ensure_server_cert() {
   local domain="$1"
   local force="${2:-false}"
@@ -1485,13 +1585,13 @@ EOF
   echo "  journalctl -u slipstream-server -f"
 }
 
-write_client_service() {
-  local resolver="$1" domain="$2" port="$3"
+write_client_service_named() {
+  local service_name="$1" resolver="$2" domain="$3" port="$4"
   local bin_path="$SLIPSTREAM_CLIENT_BIN"
 
-  cat >/etc/systemd/system/slipstream-client.service <<EOF
+  cat >"/etc/systemd/system/${service_name}.service" <<EOF
 [Unit]
-Description=Slipstream DNS Tunnel Client
+Description=Slipstream DNS Tunnel Client (${service_name})
 After=network.target
 StartLimitIntervalSec=0
 
@@ -1517,6 +1617,11 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+write_client_service() {
+  local resolver="$1" domain="$2" port="$3"
+  write_client_service_named "slipstream-client" "$resolver" "$domain" "$port"
 }
 
 client_transport_port_from_config() {
@@ -1987,16 +2092,17 @@ EOF
 client_recover_reason() {
   local lookback="${1:-6 minutes ago}"
   local listen_port="${2:-${PORT:-7000}}"
+  local service_name="${3:-slipstream-client}"
 
-  if ! systemctl is-active --quiet slipstream-client; then
-    echo "slipstream-client service not active"
+  if ! systemctl is-active --quiet "$service_name"; then
+    echo "$service_name service not active"
     return 0
   fi
   if ! ss -lntH "sport = :$listen_port" 2>/dev/null | grep -q .; then
     echo "client listen port $listen_port is not open"
     return 0
   fi
-  if journalctl -u slipstream-client --since "$lookback" --no-pager -l | grep -Eq \
+  if journalctl -u "$service_name" --since "$lookback" --no-pager -l | grep -Eq \
     'WATCHDOG: main loop stalled|ERROR connection flow blocked'; then
     echo "recent watchdog/flow-blocked runtime errors detected"
     return 0
@@ -2221,6 +2327,377 @@ cmd_dashboard() {
     echo ""
     echo "Recent health events:"
     tail -5 "$HEALTH_LOG" | sed 's/^/  /'
+  fi
+}
+
+ensure_instance_client_binary() {
+  if [[ -x "$SLIPSTREAM_CLIENT_BIN" ]]; then
+    return 0
+  fi
+  local arch
+  arch=$(detect_arch)
+  log "slipstream-client binary not found; installing ${SLIPSTREAM_CORE} core..."
+  download_slipstream_component "client" "$SLIPSTREAM_CLIENT_BIN" "$arch" \
+    || error "Failed to download slipstream-client binary"
+  chmod +x "$SLIPSTREAM_CLIENT_BIN"
+}
+
+write_instance_client_service() {
+  local instance="$1" resolver="$2" domain="$3" port="$4"
+  local service_name
+  service_name=$(instance_client_service "$instance")
+  write_client_service_named "$service_name" "$resolver" "$domain" "$port"
+}
+
+setup_instance_timers() {
+  local instance="$1"
+  local health_service health_timer watchdog_service watchdog_timer
+  health_service=$(instance_health_service "$instance")
+  health_timer=$(instance_health_timer "$instance")
+  watchdog_service=$(instance_watchdog_service "$instance")
+  watchdog_timer=$(instance_watchdog_timer "$instance")
+  setup_health_timer_named "$health_service" "$health_timer" "$TUNNEL_CMD_BIN instance-health $instance"
+  setup_watchdog_timer_named "$watchdog_service" "$watchdog_timer" "$TUNNEL_CMD_BIN instance-watchdog $instance"
+}
+
+start_instance_stack() {
+  local instance="$1"
+  local service_name health_timer watchdog_timer
+  service_name=$(instance_client_service "$instance")
+  health_timer=$(instance_health_timer "$instance")
+  watchdog_timer=$(instance_watchdog_timer "$instance")
+  systemctl enable "$service_name"
+  start_named_client_stack "$service_name"
+  systemctl start "$health_timer" || true
+  systemctl start "$watchdog_timer" || true
+}
+
+stop_instance_stack() {
+  local instance="$1"
+  local service_name health_timer watchdog_timer
+  service_name=$(instance_client_service "$instance")
+  health_timer=$(instance_health_timer "$instance")
+  watchdog_timer=$(instance_watchdog_timer "$instance")
+  systemctl stop "$watchdog_timer" 2>/dev/null || true
+  systemctl stop "$health_timer" 2>/dev/null || true
+  stop_named_client_stack "$service_name" 2>/dev/null || true
+}
+
+restart_instance_stack() {
+  local instance="$1"
+  local service_name health_timer watchdog_timer
+  service_name=$(instance_client_service "$instance")
+  health_timer=$(instance_health_timer "$instance")
+  watchdog_timer=$(instance_watchdog_timer "$instance")
+  restart_named_client_stack "$service_name"
+  systemctl start "$health_timer" || true
+  systemctl start "$watchdog_timer" || true
+}
+
+cmd_instance_add() {
+  need_root
+  check_dependencies systemctl ss
+  install_self
+  enable_bbr_if_possible
+
+  local instance="${1:-}" domain="" port="7001" resolver="" input
+  if [[ -z "$instance" ]]; then
+    read -r -p "Instance name (e.g., dubai): " instance
+  fi
+  validate_instance_name_or_error "$instance"
+  [[ "$instance" != "default" ]] || error "Instance name 'default' is reserved for the main client profile"
+
+  local cfg instance_path servers_file health_log service_name
+  instance_path=$(instance_dir "$instance")
+  cfg=$(instance_config_file "$instance")
+  servers_file=$(instance_servers_file "$instance")
+  health_log=$(instance_health_log "$instance")
+  service_name=$(instance_client_service "$instance")
+  [[ ! -f "$cfg" ]] || error "Instance already exists: $instance"
+
+  ensure_service_user
+  ensure_instance_client_binary
+
+  echo "=== Add Client Instance: $instance ==="
+  read -r -p "Domain (e.g., f.example.com): " domain
+  validate_domain_or_error "$domain"
+  read -r -p "Local listen port [7001]: " input
+  [[ -n "$input" ]] && port="$input"
+  validate_port_or_error "$port"
+  if port_in_use "$port"; then
+    error "Port $port is already in use on this host"
+  fi
+  read -r -p "DNS resolver IP (server IP): " resolver
+  validate_ipv4_or_error "$resolver"
+
+  mkdir -p "$instance_path"
+  printf '%s\n' "$resolver" >"$servers_file"
+  : >"$health_log"
+  cat >"$cfg" <<EOF
+INSTANCE_NAME=$instance
+MODE=client
+DOMAIN=$domain
+CURRENT_SERVER=$resolver
+PORT=$port
+SLIPSTREAM_CORE=$SLIPSTREAM_CORE
+SLIPSTREAM_REPO=$SLIPSTREAM_REPO
+SLIPSTREAM_VERSION=$SLIPSTREAM_VERSION
+SLIPSTREAM_ASSET_LAYOUT=$SLIPSTREAM_ASSET_LAYOUT
+SCAN_SOURCE=file
+SCAN_DNS_FILE=$servers_file
+SCAN_COUNTRY=ir
+SCAN_MODE=fast
+SCAN_WORKERS=500
+SCAN_TIMEOUT=2s
+SCAN_THRESHOLD=50
+SSH_AUTH_ENABLED=false
+SSH_AUTH_USER=
+SSH_PASS_B64=
+SSH_REMOTE_APP_PORT=
+SSH_TRANSPORT_PORT=
+EOF
+  warn "Instance '$instance' uses direct slipstream mode (SSH auth overlay disabled)."
+
+  write_instance_client_service "$instance" "$resolver" "$domain" "$port"
+  setup_instance_timers "$instance"
+  systemctl daemon-reload
+  start_instance_stack "$instance"
+
+  log "Client instance '$instance' is ready on port $port"
+  cmd_instance_status "$instance"
+}
+
+cmd_instance_list() {
+  check_dependencies systemctl
+  if [[ ! -d "$INSTANCES_DIR" ]]; then
+    echo "No extra client instances configured."
+    return 0
+  fi
+
+  local any=false
+  local cfg instance status port resolver
+  echo "=== Client Instances ==="
+  for cfg in "$INSTANCES_DIR"/*/config; do
+    [[ -f "$cfg" ]] || continue
+    any=true
+    instance=$(basename "$(dirname "$cfg")")
+    # shellcheck disable=SC1090
+    source "$cfg"
+    status=$(service_state "$(instance_client_service "$instance")")
+    port="${PORT:-unknown}"
+    resolver="${CURRENT_SERVER:-unknown}"
+    printf "  %-16s service=%-10s port=%-6s resolver=%s\n" "$instance" "$status" "$port" "$resolver"
+  done
+  if [[ "$any" == false ]]; then
+    echo "No extra client instances configured."
+  fi
+}
+
+cmd_instance_status() {
+  check_dependencies systemctl
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-status <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+
+  local service_name health_timer watchdog_timer health_log
+  service_name=$(instance_client_service "$instance")
+  health_timer=$(instance_health_timer "$instance")
+  watchdog_timer=$(instance_watchdog_timer "$instance")
+  health_log=$(instance_health_log "$instance")
+
+  echo "=== Client Instance Status: $instance ==="
+  echo "Domain: ${DOMAIN:-unknown}"
+  echo "Port: ${PORT:-unknown}"
+  echo "Current DNS: ${CURRENT_SERVER:-unknown}"
+  echo "Core: ${SLIPSTREAM_CORE:-nightowl}"
+  echo "Service: $(service_state "$service_name")"
+  echo "Health timer: $(service_state "$health_timer")"
+  echo "Runtime watchdog: $(service_state "$watchdog_timer")"
+  if [[ -f "$health_log" ]]; then
+    echo ""
+    echo "Recent health events:"
+    tail -5 "$health_log" | sed 's/^/  /'
+  fi
+}
+
+cmd_instance_start() {
+  need_root
+  check_dependencies systemctl
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-start <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+  setup_instance_timers "$instance"
+  systemctl daemon-reload
+  start_instance_stack "$instance"
+  log "Started instance: $instance"
+}
+
+cmd_instance_stop() {
+  need_root
+  check_dependencies systemctl
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-stop <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+  stop_instance_stack "$instance"
+  log "Stopped instance: $instance"
+}
+
+cmd_instance_restart() {
+  need_root
+  check_dependencies systemctl
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-restart <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+  setup_instance_timers "$instance"
+  systemctl daemon-reload
+  restart_instance_stack "$instance"
+  log "Restarted instance: $instance"
+}
+
+cmd_instance_logs() {
+  check_dependencies journalctl
+  local instance="${1:-}" follow="${2:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-logs <name> [-f]"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+  local service_name
+  service_name=$(instance_client_service "$instance")
+  if [[ "$follow" == "-f" ]]; then
+    journalctl -u "$service_name" -f
+  else
+    journalctl -u "$service_name" -n 100 --no-pager
+  fi
+}
+
+cmd_instance_del() {
+  need_root
+  check_dependencies systemctl rm
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-del <name>"
+  validate_instance_name_or_error "$instance"
+  [[ "$instance" != "default" ]] || error "Cannot delete reserved instance name: default"
+  load_instance_config_or_error "$instance"
+
+  local service_name health_service health_timer watchdog_service watchdog_timer instance_path
+  service_name=$(instance_client_service "$instance")
+  health_service=$(instance_health_service "$instance")
+  health_timer=$(instance_health_timer "$instance")
+  watchdog_service=$(instance_watchdog_service "$instance")
+  watchdog_timer=$(instance_watchdog_timer "$instance")
+  instance_path=$(instance_dir "$instance")
+
+  stop_instance_stack "$instance"
+  systemctl disable "$service_name" 2>/dev/null || true
+  systemctl disable "$health_timer" 2>/dev/null || true
+  systemctl disable "$watchdog_timer" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${service_name}.service"
+  rm -f "/etc/systemd/system/${health_service}.service"
+  rm -f "/etc/systemd/system/${health_timer}"
+  rm -f "/etc/systemd/system/${watchdog_service}.service"
+  rm -f "/etc/systemd/system/${watchdog_timer}"
+  rm -rf "$instance_path"
+  systemctl daemon-reload
+  log "Deleted instance: $instance"
+}
+
+cmd_instance_health() {
+  need_root
+  check_dependencies systemctl ss journalctl grep dig wc tail date
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-health <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+
+  local cfg servers_file health_log service_name
+  cfg=$(instance_config_file "$instance")
+  servers_file=$(instance_servers_file "$instance")
+  health_log=$(instance_health_log "$instance")
+  service_name=$(instance_client_service "$instance")
+  [[ "${MODE:-}" == "client" ]] || error "Instance '$instance' is not in client mode"
+
+  local timestamp
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+  local recover_reason=""
+  if recover_reason=$(client_recover_reason "6 minutes ago" "${PORT:-7000}" "$service_name"); then
+    echo "[$timestamp] Self-heal triggered: $recover_reason" >>"$health_log"
+    if restart_named_client_stack "$service_name"; then
+      echo "[$timestamp] Self-heal restart completed" >>"$health_log"
+      sleep 2
+    else
+      echo "[$timestamp] ERROR: service restart failed" >>"$health_log"
+    fi
+  fi
+
+  local latency
+  latency=$(test_dns_latency "$CURRENT_SERVER" "$DOMAIN" || echo "9999")
+  if [[ "$latency" -gt 1000 ]]; then
+    echo "[$timestamp] Current server $CURRENT_SERVER slow (${latency}ms), checking alternatives..." >>"$health_log"
+    if [[ -f "$servers_file" ]]; then
+      local best_server best_latency
+      read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$servers_file" || true)"
+      if [[ -n "$best_server" && "$best_server" != "$CURRENT_SERVER" && "$best_latency" -lt 1000 ]]; then
+        set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
+        write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT"
+        systemctl daemon-reload
+        if restart_named_client_stack "$service_name"; then
+          echo "[$timestamp] Switched to $best_server (${best_latency}ms)" >>"$health_log"
+        else
+          echo "[$timestamp] ERROR: switch restart failed" >>"$health_log"
+        fi
+      else
+        echo "[$timestamp] No better server found" >>"$health_log"
+      fi
+    fi
+  else
+    echo "[$timestamp] Server $CURRENT_SERVER OK (${latency}ms)" >>"$health_log"
+  fi
+
+  if [[ $(wc -l <"$health_log") -gt 1000 ]]; then
+    local tmp_health
+    tmp_health=$(mktemp /tmp/health.XXXXXX.log)
+    tail -500 "$health_log" >"$tmp_health" && mv "$tmp_health" "$health_log"
+  fi
+}
+
+cmd_instance_watchdog() {
+  need_root
+  check_dependencies systemctl ss journalctl grep date mkdir
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-watchdog <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+
+  local service_name reason="" now last=0 state_file health_log
+  service_name=$(instance_client_service "$instance")
+  health_log=$(instance_health_log "$instance")
+  if ! reason=$(client_recover_reason "90 seconds ago" "${PORT:-7000}" "$service_name"); then
+    exit 0
+  fi
+
+  state_file=$(instance_watchdog_last_restart_file "$instance")
+  now=$(date +%s)
+  mkdir -p "$WATCHDOG_STATE_DIR"
+  if [[ -f "$state_file" ]]; then
+    last=$(cat "$state_file" 2>/dev/null || echo 0)
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  fi
+  if ((now - last < 45)); then
+    exit 0
+  fi
+  echo "$now" >"$state_file"
+
+  local timestamp
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$timestamp] Watchdog restart triggered: $reason" >>"$health_log"
+  if restart_named_client_stack "$service_name"; then
+    echo "[$timestamp] Watchdog restart completed" >>"$health_log"
+  else
+    echo "[$timestamp] ERROR: watchdog restart failed" >>"$health_log"
   fi
 }
 
@@ -3153,24 +3630,22 @@ test_dns_latency() {
   fi
 }
 
-setup_health_timer() {
-  local script_path="$TUNNEL_CMD_BIN"
+setup_health_timer_named() {
+  local service_name="$1" timer_name="$2" exec_command="$3"
 
-  # Create systemd service
-  cat >/etc/systemd/system/tunnel-health.service <<EOF
+  cat >"/etc/systemd/system/${service_name}.service" <<EOF
 [Unit]
-Description=DNS Tunnel Health Check
+Description=DNS Tunnel Health Check (${service_name})
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=$script_path health
+ExecStart=$exec_command
 EOF
 
-  # Create systemd timer
-  cat >/etc/systemd/system/tunnel-health.timer <<EOF
+  cat >"/etc/systemd/system/${timer_name}" <<EOF
 [Unit]
-Description=DNS Tunnel Health Check Timer
+Description=DNS Tunnel Health Check Timer (${timer_name})
 
 [Timer]
 OnBootSec=5min
@@ -3181,27 +3656,31 @@ WantedBy=timers.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable tunnel-health.timer
-  systemctl start tunnel-health.timer
+  systemctl enable "$timer_name"
+  systemctl start "$timer_name"
+}
+
+setup_health_timer() {
+  setup_health_timer_named "tunnel-health" "tunnel-health.timer" "$TUNNEL_CMD_BIN health"
   log "Health check timer installed (runs every 5 minutes)"
 }
 
-setup_watchdog_timer() {
-  local script_path="$TUNNEL_CMD_BIN"
+setup_watchdog_timer_named() {
+  local service_name="$1" timer_name="$2" exec_command="$3"
 
-  cat >/etc/systemd/system/tunnel-watchdog.service <<EOF
+  cat >"/etc/systemd/system/${service_name}.service" <<EOF
 [Unit]
-Description=DNS Tunnel Runtime Watchdog
+Description=DNS Tunnel Runtime Watchdog (${service_name})
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=$script_path watchdog
+ExecStart=$exec_command
 EOF
 
-  cat >/etc/systemd/system/tunnel-watchdog.timer <<EOF
+  cat >"/etc/systemd/system/${timer_name}" <<EOF
 [Unit]
-Description=DNS Tunnel Runtime Watchdog Timer
+Description=DNS Tunnel Runtime Watchdog Timer (${timer_name})
 
 [Timer]
 OnBootSec=90s
@@ -3213,8 +3692,12 @@ WantedBy=timers.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable tunnel-watchdog.timer
-  systemctl start tunnel-watchdog.timer
+  systemctl enable "$timer_name"
+  systemctl start "$timer_name"
+}
+
+setup_watchdog_timer() {
+  setup_watchdog_timer_named "tunnel-watchdog" "tunnel-watchdog.timer" "$TUNNEL_CMD_BIN watchdog"
   log "Runtime watchdog timer installed (runs every 30 seconds)"
 }
 
@@ -3317,6 +3800,24 @@ cmd_status() {
       echo "Recent health checks:"
       tail -5 "$HEALTH_LOG" | sed 's/^/  /'
     fi
+
+    if [[ -d "$INSTANCES_DIR" ]]; then
+      local cfg instance extra_count
+      extra_count=0
+      for cfg in "$INSTANCES_DIR"/*/config; do
+        [[ -f "$cfg" ]] || continue
+        extra_count=$((extra_count + 1))
+      done
+      if ((extra_count > 0)); then
+        echo ""
+        echo "Extra client instances:"
+        for cfg in "$INSTANCES_DIR"/*/config; do
+          [[ -f "$cfg" ]] || continue
+          instance=$(basename "$(dirname "$cfg")")
+          echo "  $instance: $(service_state "$(instance_client_service "$instance")")"
+        done
+      fi
+    fi
   fi
 }
 
@@ -3394,6 +3895,28 @@ cmd_remove() {
     rm -f /etc/systemd/system/tunnel-watchdog.timer
     rm -f /etc/systemd/system/tunnel-watchdog.service
   fi
+
+  local unit
+  for unit in /etc/systemd/system/slipstream-client-*.service; do
+    [[ -f "$unit" ]] || continue
+    local svc
+    svc=$(basename "$unit" .service)
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
+    rm -f "$unit"
+  done
+  for unit in /etc/systemd/system/tunnel-health-*.service /etc/systemd/system/tunnel-watchdog-*.service; do
+    [[ -f "$unit" ]] || continue
+    rm -f "$unit"
+  done
+  for unit in /etc/systemd/system/tunnel-health-*.timer /etc/systemd/system/tunnel-watchdog-*.timer; do
+    [[ -f "$unit" ]] || continue
+    local timer_name
+    timer_name=$(basename "$unit")
+    systemctl stop "$timer_name" 2>/dev/null || true
+    systemctl disable "$timer_name" 2>/dev/null || true
+    rm -f "$unit"
+  done
 
   systemctl daemon-reload
 
@@ -3488,6 +4011,43 @@ main() {
   restart) cmd_restart ;;
   health) cmd_health ;;
   watchdog) cmd_watchdog ;;
+  instance-add)
+    shift
+    cmd_instance_add "${1:-}"
+    ;;
+  instance-list) cmd_instance_list ;;
+  instance-status)
+    shift
+    cmd_instance_status "${1:-}"
+    ;;
+  instance-start)
+    shift
+    cmd_instance_start "${1:-}"
+    ;;
+  instance-stop)
+    shift
+    cmd_instance_stop "${1:-}"
+    ;;
+  instance-restart)
+    shift
+    cmd_instance_restart "${1:-}"
+    ;;
+  instance-logs)
+    shift
+    cmd_instance_logs "${1:-}" "${2:-}"
+    ;;
+  instance-del)
+    shift
+    cmd_instance_del "${1:-}"
+    ;;
+  instance-health)
+    shift
+    cmd_instance_health "${1:-}"
+    ;;
+  instance-watchdog)
+    shift
+    cmd_instance_watchdog "${1:-}"
+    ;;
   rescan) cmd_rescan ;;
   dashboard) cmd_dashboard ;;
   servers) cmd_servers ;;

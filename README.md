@@ -69,6 +69,14 @@ slipstream-tunnel watchdog  # Immediate runtime self-heal check (client mode)
 slipstream-tunnel rescan    # Manual DNS rescan + switch best server
 slipstream-tunnel dashboard # Small client dashboard
 slipstream-tunnel servers   # Full verified DNS list (live ping + DNS latency)
+slipstream-tunnel instance-add <name> # Add extra client instance on same host
+slipstream-tunnel instance-list # List extra client instances
+slipstream-tunnel instance-status <name> # Show one extra instance
+slipstream-tunnel instance-start <name> # Start one extra instance
+slipstream-tunnel instance-stop <name> # Stop one extra instance
+slipstream-tunnel instance-restart <name> # Restart one extra instance
+slipstream-tunnel instance-logs <name> [-f] # Logs for one extra instance
+slipstream-tunnel instance-del <name> # Delete one extra instance
 slipstream-tunnel menu      # Interactive monitoring menu (client/server)
 sst                         # Short command for monitor menu
 slipstream-tunnel speed-profile [fast|secure|status] # Toggle/check profile
@@ -86,6 +94,25 @@ slipstream-tunnel remove    # Remove everything
 ```
 
 Inside `menu`, actions are grouped into compact submenus (monitoring, service, auth/profile) for both server and client.
+
+## Multi-Instance Client
+
+You can run multiple client tunnels on one machine (different local ports), for example:
+
+- `7001` -> Finland
+- `7002` -> Dubai
+- `7003` -> Netherlands
+
+Example:
+
+```bash
+slipstream-tunnel instance-add finland
+slipstream-tunnel instance-add dubai
+slipstream-tunnel instance-list
+slipstream-tunnel instance-status finland
+```
+
+Note: extra instances currently run in direct slipstream mode (SSH auth overlay disabled).
 
 ## Options
 

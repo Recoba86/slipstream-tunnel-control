@@ -83,6 +83,14 @@ slipstream-tunnel watchdog  # بررسی فوری runtime و self-heal (کلای
 slipstream-tunnel rescan    # اسکن دستی DNS و تعویض به بهترین
 slipstream-tunnel dashboard # داشبورد کوچک کلاینت
 slipstream-tunnel servers   # نمایش کامل DNSهای تاییدشده با ping و latency
+slipstream-tunnel instance-add <name> # افزودن کلاینت اضافه روی همین ماشین
+slipstream-tunnel instance-list # لیست کلاینت‌های اضافه
+slipstream-tunnel instance-status <name> # وضعیت یک کلاینت اضافه
+slipstream-tunnel instance-start <name> # شروع یک کلاینت اضافه
+slipstream-tunnel instance-stop <name> # توقف یک کلاینت اضافه
+slipstream-tunnel instance-restart <name> # ری‌استارت یک کلاینت اضافه
+slipstream-tunnel instance-logs <name> [-f] # لاگ یک کلاینت اضافه
+slipstream-tunnel instance-del <name> # حذف یک کلاینت اضافه
 slipstream-tunnel menu      # منوی مانیتورینگ دستی
 sst                         # دستور کوتاه برای باز کردن منوی مانیتورینگ
 slipstream-tunnel speed-profile [fast|secure|status] # تغییر/نمایش پروفایل سرعت
@@ -100,6 +108,25 @@ slipstream-tunnel remove    # حذف همه چیز
 ```
 
 داخل `menu` گزینه‌ها در ساب‌منوهای مرتب (مانیتورینگ، سرویس، auth/profile) گروه‌بندی شده‌اند.
+
+## حالت Multi-Instance کلاینت
+
+می‌توانید روی یک ماشین چند کلاینت همزمان بالا بیاورید (با پورت‌های محلی متفاوت)، مثل:
+
+- `7001` -> Finland
+- `7002` -> Dubai
+- `7003` -> Netherlands
+
+مثال:
+
+```bash
+slipstream-tunnel instance-add finland
+slipstream-tunnel instance-add dubai
+slipstream-tunnel instance-list
+slipstream-tunnel instance-status finland
+```
+
+نکته: کلاینت‌های اضافه فعلاً در حالت direct slipstream اجرا می‌شوند (SSH auth overlay خاموش است).
 
 <div dir="rtl">
 
