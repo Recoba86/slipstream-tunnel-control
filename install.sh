@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # DNS Tunnel Setup - Automated slipstream tunnel configuration
 set -euo pipefail
+# systemd units may run without HOME; keep script safe under `set -u`.
+HOME="${HOME:-/root}"
 
 # =============================================================================
 # Release source configuration (pinned versions)
