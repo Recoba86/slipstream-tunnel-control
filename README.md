@@ -9,7 +9,7 @@ Slipstream DNS tunnel setup with automatic DNS server scanning via dnscan.
 ### Server (outside Iran)
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
+sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) server
 ```
 
 Follow the prompts to configure Cloudflare DNS.
@@ -17,7 +17,7 @@ Follow the prompts to configure Cloudflare DNS.
 ### Client (inside Iran)
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
+sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) client
 ```
 
 After install, `slipstream-tunnel` command is available globally.

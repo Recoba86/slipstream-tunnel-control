@@ -9,6 +9,8 @@ SLIPSTREAM_REPO="nightowlnerd/slipstream-rust"
 SLIPSTREAM_VERSION="${SLIPSTREAM_VERSION:-v0.1.1}"
 DNSCAN_REPO="nightowlnerd/dnscan"
 DNSCAN_VERSION="${DNSCAN_VERSION:-v1.4.0}"
+SCRIPT_REPO="${SCRIPT_REPO:-Recoba86/slipstream-tunnel-control}"
+SCRIPT_BRANCH="${SCRIPT_BRANCH:-main}"
 # =============================================================================
 
 TUNNEL_DIR="$HOME/.tunnel"
@@ -267,7 +269,7 @@ install_self() {
     cp "$current_script" "$install_path"
   else
     # Pipe/process substitution - download instead
-    curl -fsSL "https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh" -o "$install_path"
+    curl -fsSL "https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/install.sh" -o "$install_path"
   fi
 
   chmod +x "$install_path"
@@ -909,8 +911,12 @@ EOF
   echo ""
   echo "Verified servers saved to: $SERVERS_FILE"
   echo ""
-  log "Opening client monitor menu..."
-  cmd_menu
+  if [[ -t 0 ]]; then
+    log "Opening client monitor menu..."
+    cmd_menu
+  else
+    warn "Non-interactive session detected; skipping menu auto-open"
+  fi
 }
 
 # ============================================
@@ -1120,7 +1126,7 @@ cmd_servers() {
 
 cmd_select_server() {
   need_root
-  check_dependencies systemctl
+  check_dependencies systemctl dig
   load_config_or_error
   [[ "${MODE:-}" == "client" ]] || error "Manual selection is available only in client mode"
   [[ -s "$SERVERS_FILE" ]] || error "No verified DNS server list found"

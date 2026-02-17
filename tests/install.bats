@@ -14,7 +14,10 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"rescan"* ]]
   [[ "$output" == *"dashboard"* ]]
+  [[ "$output" == *"servers"* ]]
   [[ "$output" == *"menu"* ]]
+  [[ "$output" == *"m                   Short alias for menu"* ]]
+  [[ "$output" == *"sst"* ]]
 }
 
 @test "IPv4 helper accepts valid address and rejects invalid address" {

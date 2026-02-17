@@ -13,7 +13,7 @@
 </div>
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
+sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) server
 ```
 
 <div dir="rtl">
@@ -25,7 +25,7 @@ sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-t
 </div>
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
+sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) client
 ```
 
 <div dir="rtl">
