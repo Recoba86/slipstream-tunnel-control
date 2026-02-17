@@ -733,13 +733,19 @@ test_client_ssh_auth_credentials() {
       fi
     fi
 
+    if [[ "$probe_tail" == *"Connection refused"* || "$probe_tail" == *"Connection closed"* || "$probe_tail" == *"timed out"* ]]; then
+      warn "SSH credential preflight could not be confirmed after ${max_attempts} attempts (last error: $probe_tail)"
+      return 2
+    fi
+
     if [[ -n "$probe_tail" ]]; then
       error "SSH credential test failed (user/password/transport/app-port). Details: $probe_tail"
     fi
     error "SSH credential test failed (user/password/transport/app-port). Exit code: ${probe_rc}"
   done
 
-  error "SSH credential test failed after ${max_attempts} attempts (transport/auth path timeout)"
+  warn "SSH credential preflight could not be confirmed after ${max_attempts} attempts (transport/auth path timeout)"
+  return 2
 }
 
 write_ssh_auth_config() {
@@ -1633,7 +1639,14 @@ cmd_client() {
   systemctl restart slipstream-client
 
   if [[ "$ssh_auth_client" == "true" ]]; then
-    test_client_ssh_auth_credentials "$ssh_user" "$ssh_pass" "$ssh_transport_port" "$port" "$ssh_remote_port"
+    if ! test_client_ssh_auth_credentials "$ssh_user" "$ssh_pass" "$ssh_transport_port" "$port" "$ssh_remote_port"; then
+      local preflight_rc=$?
+      if [[ "$preflight_rc" -eq 2 ]]; then
+        warn "Proceeding despite inconclusive SSH preflight. Verify with: slipstream-tunnel status && slipstream-tunnel logs -f"
+      else
+        error "SSH credential test failed. Aborting client setup."
+      fi
+    fi
     write_ssh_client_env "$ssh_user" "$ssh_pass_b64" "$ssh_transport_port" "$port" "$ssh_remote_port"
     write_ssh_client_service
     systemctl daemon-reload
@@ -2118,7 +2131,14 @@ cmd_edit_client() {
     systemctl daemon-reload
     systemctl restart slipstream-client
     systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
-    test_client_ssh_auth_credentials "$new_ssh_user" "$new_ssh_pass_plain" "$new_ssh_transport_port" "$new_port" "$new_ssh_remote_port"
+    if ! test_client_ssh_auth_credentials "$new_ssh_user" "$new_ssh_pass_plain" "$new_ssh_transport_port" "$new_port" "$new_ssh_remote_port"; then
+      local preflight_rc=$?
+      if [[ "$preflight_rc" -eq 2 ]]; then
+        warn "Proceeding despite inconclusive SSH preflight. Verify with: slipstream-tunnel status && slipstream-tunnel logs -f"
+      else
+        error "SSH credential test failed. Aborting client edit."
+      fi
+    fi
 
     set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
     set_config_value "PORT" "$new_port" "$CONFIG_FILE"
