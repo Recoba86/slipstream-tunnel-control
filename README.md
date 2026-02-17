@@ -65,6 +65,7 @@ slipstream-tunnel restart   # Restart tunnel service (current mode)
 slipstream-tunnel status    # Show current status
 slipstream-tunnel logs      # View logs (add -f to follow)
 slipstream-tunnel health    # Check DNS and switch if slow
+slipstream-tunnel watchdog  # Immediate runtime self-heal check (client mode)
 slipstream-tunnel rescan    # Manual DNS rescan + switch best server
 slipstream-tunnel dashboard # Small client dashboard
 slipstream-tunnel servers   # Full verified DNS list (live ping + DNS latency)
@@ -130,15 +131,17 @@ slipstream-tunnel client --core plus --domain t.example.com
 4. Scans and verifies DNS servers with actual tunnel connection
 5. Picks fastest verified server and starts slipstream-client
 6. Optional: asks SSH username/password and enables client SSH auth overlay
-7. Sets up hourly health check and opens interactive monitor menu
+7. Sets up 5-minute health checks + 30-second runtime watchdog and opens interactive monitor menu
 
-### Health Check
+### Health & Recovery
 
-- Runs every hour via systemd timer
+- Health check runs every 5 minutes via systemd timer
+- Runtime watchdog runs every 30 seconds via systemd timer
 - Tests current DNS server latency
 - If latency > 1000ms, switches to better server
+- If runtime errors or listener failures are detected, auto-restarts client stack
 - Logs to `~/.tunnel/health.log`
-- You can trigger checks manually with `slipstream-tunnel health` or full rescan with `slipstream-tunnel rescan`
+- You can trigger checks manually with `slipstream-tunnel health`, `slipstream-tunnel watchdog`, or full rescan with `slipstream-tunnel rescan`
 - Use `slipstream-tunnel dashboard` or `slipstream-tunnel menu` for manual monitoring
 
 ## SSH Auth Overlay

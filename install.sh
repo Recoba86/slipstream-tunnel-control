@@ -39,6 +39,8 @@ SSH_CLIENT_SERVICE="slipstream-ssh-client"
 SSH_CLIENT_ENV_DIR="/etc/slipstream-tunnel"
 SSH_CLIENT_ENV_FILE="$SSH_CLIENT_ENV_DIR/ssh-client.env"
 BBR_SYSCTL_FILE="/etc/sysctl.d/99-slipstream-tunnel-bbr.conf"
+WATCHDOG_STATE_DIR="/run/slipstream-tunnel"
+WATCHDOG_LAST_RESTART_FILE="$WATCHDOG_STATE_DIR/watchdog.last_restart"
 
 # Colors
 RED='\033[0;31m'
@@ -71,13 +73,14 @@ Commands:
   stop                Stop tunnel service (server/client mode)
   restart             Restart tunnel service (server/client mode)
   health              Check DNS server and switch if slow
+  watchdog            Run immediate runtime watchdog check (client mode)
   rescan              Run manual DNS rescan and switch to best server
   dashboard           Show client tunnel dashboard
   servers             Show verified DNS IPs with live latency checks
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
   speed-profile       Set profile: fast (SSH off) / secure (SSH on)
-  core-switch        Switch current mode to another core (nightowl/plus)
+  core-switch         Switch current mode to another core (nightowl/plus)
   auth-setup          Enable/update SSH auth overlay for server mode
   auth-disable        Disable SSH auth overlay for server mode
   auth-client-enable  Enable SSH auth overlay for client mode
@@ -115,6 +118,7 @@ Examples:
   slipstream-tunnel edit
   slipstream-tunnel stop
   slipstream-tunnel start
+  slipstream-tunnel watchdog
   slipstream-tunnel rescan
   slipstream-tunnel servers
   slipstream-tunnel menu
@@ -1489,6 +1493,7 @@ write_client_service() {
 [Unit]
 Description=Slipstream DNS Tunnel Client
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -1507,7 +1512,7 @@ ProtectKernelTunables=true
 ProtectSystem=strict
 ProtectHome=true
 Restart=always
-RestartSec=5
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
@@ -1926,8 +1931,9 @@ SSH_REMOTE_APP_PORT=$ssh_remote_port
 SSH_TRANSPORT_PORT=$ssh_transport_port
 EOF
 
-  # Setup health check timer
+  # Setup recovery timers
   setup_health_timer
+  setup_watchdog_timer
 
   # Install global command
   install_self
@@ -1950,6 +1956,7 @@ EOF
   echo "  slipstream-tunnel start"
   echo "  slipstream-tunnel restart"
   echo "  slipstream-tunnel health"
+  echo "  slipstream-tunnel watchdog"
   echo "  slipstream-tunnel rescan"
   echo "  slipstream-tunnel dashboard"
   echo "  slipstream-tunnel servers"
@@ -1977,6 +1984,63 @@ EOF
 # ============================================
 # HEALTH CHECK
 # ============================================
+client_recover_reason() {
+  local lookback="${1:-6 minutes ago}"
+  local listen_port="${2:-${PORT:-7000}}"
+
+  if ! systemctl is-active --quiet slipstream-client; then
+    echo "slipstream-client service not active"
+    return 0
+  fi
+  if ! ss -lntH "sport = :$listen_port" 2>/dev/null | grep -q .; then
+    echo "client listen port $listen_port is not open"
+    return 0
+  fi
+  if journalctl -u slipstream-client --since "$lookback" --no-pager -l | grep -Eq \
+    'WATCHDOG: main loop stalled|ERROR connection flow blocked'; then
+    echo "recent watchdog/flow-blocked runtime errors detected"
+    return 0
+  fi
+  return 1
+}
+
+cmd_watchdog() {
+  need_root
+  check_dependencies systemctl ss journalctl grep date mkdir
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    exit 0
+  fi
+  load_config_or_error
+  [[ "${MODE:-}" == "client" ]] || exit 0
+
+  local reason=""
+  if ! reason=$(client_recover_reason "90 seconds ago" "${PORT:-7000}"); then
+    exit 0
+  fi
+
+  local now last=0
+  now=$(date +%s)
+  mkdir -p "$WATCHDOG_STATE_DIR"
+  if [[ -f "$WATCHDOG_LAST_RESTART_FILE" ]]; then
+    last=$(cat "$WATCHDOG_LAST_RESTART_FILE" 2>/dev/null || echo 0)
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  fi
+  if ((now - last < 45)); then
+    exit 0
+  fi
+  echo "$now" >"$WATCHDOG_LAST_RESTART_FILE"
+
+  local timestamp
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$timestamp] Watchdog restart triggered: $reason" >>"$HEALTH_LOG"
+  if restart_client_stack; then
+    echo "[$timestamp] Watchdog restart completed" >>"$HEALTH_LOG"
+  else
+    echo "[$timestamp] ERROR: watchdog restart failed" >>"$HEALTH_LOG"
+  fi
+}
+
 cmd_health() {
   need_root
   check_dependencies dig systemctl ss journalctl grep wc tail date
@@ -1996,16 +2060,7 @@ cmd_health() {
 
   # Fast self-heal path for common client failure states.
   local recover_reason=""
-  if ! systemctl is-active --quiet slipstream-client; then
-    recover_reason="slipstream-client service not active"
-  elif ! ss -lntH "sport = :$PORT" 2>/dev/null | grep -q .; then
-    recover_reason="client listen port $PORT is not open"
-  elif journalctl -u slipstream-client --since "6 minutes ago" --no-pager -l | grep -Eq \
-    'WATCHDOG: main loop stalled|ERROR connection flow blocked'; then
-    recover_reason="recent watchdog/flow-blocked runtime errors detected"
-  fi
-
-  if [[ -n "$recover_reason" ]]; then
+  if recover_reason=$(client_recover_reason "6 minutes ago" "$PORT"); then
     echo "Self-heal: $recover_reason"
     echo "[$timestamp] Self-heal triggered: $recover_reason" >>"$HEALTH_LOG"
     if restart_client_stack; then
@@ -2279,6 +2334,13 @@ cmd_start() {
   check_dependencies systemctl
   load_config_or_error
 
+  if [[ "${MODE:-}" == "client" ]]; then
+    if ! systemctl list-unit-files tunnel-health.timer &>/dev/null || ! systemctl list-unit-files tunnel-watchdog.timer &>/dev/null; then
+      setup_health_timer
+      setup_watchdog_timer
+    fi
+  fi
+
   local service_name
   service_name=$(service_name_for_mode)
   if [[ "${MODE:-}" == "client" ]]; then
@@ -2289,6 +2351,9 @@ cmd_start() {
 
   if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
     systemctl start tunnel-health.timer || true
+  fi
+  if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-watchdog.timer &>/dev/null; then
+    systemctl start tunnel-watchdog.timer || true
   fi
   log "Started: $service_name"
 }
@@ -2309,6 +2374,9 @@ cmd_stop() {
   if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
     systemctl stop tunnel-health.timer || true
   fi
+  if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-watchdog.timer &>/dev/null; then
+    systemctl stop tunnel-watchdog.timer || true
+  fi
   log "Stopped: $service_name"
 }
 
@@ -2316,6 +2384,13 @@ cmd_restart() {
   need_root
   check_dependencies systemctl
   load_config_or_error
+
+  if [[ "${MODE:-}" == "client" ]]; then
+    if ! systemctl list-unit-files tunnel-health.timer &>/dev/null || ! systemctl list-unit-files tunnel-watchdog.timer &>/dev/null; then
+      setup_health_timer
+      setup_watchdog_timer
+    fi
+  fi
 
   local service_name
   service_name=$(service_name_for_mode)
@@ -2327,6 +2402,9 @@ cmd_restart() {
 
   if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
     systemctl start tunnel-health.timer || true
+  fi
+  if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-watchdog.timer &>/dev/null; then
+    systemctl start tunnel-watchdog.timer || true
   fi
   log "Restarted: $service_name"
 }
@@ -2441,6 +2519,9 @@ cmd_edit_client() {
     SSH_AUTH_ENABLED="false"
   fi
   systemctl daemon-reload
+  # Keep recovery units synced with latest script logic after edits/upgrades.
+  setup_health_timer
+  setup_watchdog_timer
   restart_client_stack
 
   log "Client settings updated and service restarted"
@@ -2547,7 +2628,11 @@ server_disable_auth_overlay() {
     fi
     local ssh_service
     ssh_service=$(detect_ssh_service_name || true)
-    [[ -n "$ssh_service" ]] && systemctl restart "$ssh_service" || warn "Could not detect SSH service to restart"
+    if [[ -n "$ssh_service" ]]; then
+      systemctl restart "$ssh_service"
+    else
+      warn "Could not detect SSH service to restart"
+    fi
   fi
   [[ -n "$backup_file" ]] && rm -f "$backup_file"
 
@@ -3101,6 +3186,38 @@ EOF
   log "Health check timer installed (runs every 5 minutes)"
 }
 
+setup_watchdog_timer() {
+  local script_path="$TUNNEL_CMD_BIN"
+
+  cat >/etc/systemd/system/tunnel-watchdog.service <<EOF
+[Unit]
+Description=DNS Tunnel Runtime Watchdog
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=$script_path watchdog
+EOF
+
+  cat >/etc/systemd/system/tunnel-watchdog.timer <<EOF
+[Unit]
+Description=DNS Tunnel Runtime Watchdog Timer
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable tunnel-watchdog.timer
+  systemctl start tunnel-watchdog.timer
+  log "Runtime watchdog timer installed (runs every 30 seconds)"
+}
+
 # ============================================
 # LOGS
 # ============================================
@@ -3189,6 +3306,11 @@ cmd_status() {
     else
       echo "Health timer: not installed"
     fi
+    if systemctl list-unit-files tunnel-watchdog.timer &>/dev/null; then
+      echo "Runtime watchdog: $(service_state "tunnel-watchdog.timer")"
+    else
+      echo "Runtime watchdog: not installed"
+    fi
 
     if [[ -f "$HEALTH_LOG" ]]; then
       echo ""
@@ -3265,6 +3387,13 @@ cmd_remove() {
     rm -f /etc/systemd/system/tunnel-health.timer
     rm -f /etc/systemd/system/tunnel-health.service
   fi
+  if [[ -f /etc/systemd/system/tunnel-watchdog.timer ]]; then
+    log "Removing runtime watchdog timer..."
+    systemctl stop tunnel-watchdog.timer 2>/dev/null || true
+    systemctl disable tunnel-watchdog.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/tunnel-watchdog.timer
+    rm -f /etc/systemd/system/tunnel-watchdog.service
+  fi
 
   systemctl daemon-reload
 
@@ -3330,6 +3459,9 @@ cmd_remove() {
     log "Removing $TUNNEL_DIR..."
     rm -rf "$TUNNEL_DIR"
   fi
+  if [[ -d "$WATCHDOG_STATE_DIR" ]]; then
+    rm -rf "$WATCHDOG_STATE_DIR"
+  fi
 
   log "Cleanup complete"
 }
@@ -3355,6 +3487,7 @@ main() {
   stop) cmd_stop ;;
   restart) cmd_restart ;;
   health) cmd_health ;;
+  watchdog) cmd_watchdog ;;
   rescan) cmd_rescan ;;
   dashboard) cmd_dashboard ;;
   servers) cmd_servers ;;

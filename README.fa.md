@@ -79,6 +79,7 @@ slipstream-tunnel restart   # ری‌استارت سرویس تونل (بر اس
 slipstream-tunnel status    # نمایش وضعیت
 slipstream-tunnel logs      # مشاهده لاگ (با -f برای دنبال کردن)
 slipstream-tunnel health    # بررسی DNS و تعویض اگر کند باشد
+slipstream-tunnel watchdog  # بررسی فوری runtime و self-heal (کلاینت)
 slipstream-tunnel rescan    # اسکن دستی DNS و تعویض به بهترین
 slipstream-tunnel dashboard # داشبورد کوچک کلاینت
 slipstream-tunnel servers   # نمایش کامل DNSهای تاییدشده با ping و latency
@@ -146,13 +147,15 @@ slipstream-tunnel client --core plus --domain t.example.com
 4. اسکن و تأیید سرورهای DNS با اتصال واقعی تونل
 5. انتخاب سریع‌ترین سرور تأیید شده و شروع slipstream-client
 6. اختیاری: دریافت نام‌کاربری/رمز و فعال‌سازی لایه SSH روی کلاینت
-7. تنظیم بررسی سلامت هر ساعت و باز کردن منوی مانیتورینگ
+7. تنظیم Health (هر ۵ دقیقه) + Runtime Watchdog (هر ۳۰ ثانیه) و باز کردن منوی مانیتورینگ
 
-### بررسی سلامت
+### Health و Recovery
 
-- هر ساعت اجرا می‌شود
+- Health timer هر ۵ دقیقه اجرا می‌شود
+- Runtime watchdog هر ۳۰ ثانیه اجرا می‌شود
 - تأخیر سرور DNS فعلی را تست می‌کند
 - اگر تأخیر > 1000ms باشد، به سرور بهتر تغییر می‌دهد
+- اگر خطاهای runtime یا قطع listener دیده شود، کلاینت به‌صورت خودکار restart می‌شود
 - لاگ در `~/.tunnel/health.log`
 
 ## فایل‌ها

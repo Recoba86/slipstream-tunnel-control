@@ -23,6 +23,7 @@ setup() {
   [[ "$output" == *"stop                Stop tunnel service"* ]]
   [[ "$output" == *"restart             Restart tunnel service"* ]]
   [[ "$output" == *"rescan"* ]]
+  [[ "$output" == *"watchdog            Run immediate runtime watchdog check"* ]]
   [[ "$output" == *"dashboard"* ]]
   [[ "$output" == *"servers"* ]]
   [[ "$output" == *"menu"* ]]
