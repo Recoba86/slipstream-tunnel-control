@@ -58,6 +58,7 @@ slipstream-tunnel health    # Check DNS and switch if slow
 slipstream-tunnel rescan    # Manual DNS rescan + switch best server
 slipstream-tunnel dashboard # Small client dashboard
 slipstream-tunnel menu      # Interactive monitoring menu
+sst                         # Short command for client menu
 slipstream-tunnel remove    # Remove everything
 ```
 
@@ -85,10 +86,11 @@ slipstream-tunnel remove    # Remove everything
 ### Client Setup
 
 1. Downloads dnscan and slipstream binaries (cached for reuse)
-2. Prompts for scan settings (country, mode, workers, timeout)
-3. Scans and verifies DNS servers with actual tunnel connection
-4. Picks fastest verified server and starts slipstream-client
-5. Sets up hourly health check
+2. Prompts for tunnel listen port (default: 7000)
+3. Prompts for scan settings (country, mode, workers, timeout)
+4. Scans and verifies DNS servers with actual tunnel connection
+5. Picks fastest verified server and starts slipstream-client
+6. Sets up hourly health check and opens interactive monitor menu
 
 ### Health Check
 

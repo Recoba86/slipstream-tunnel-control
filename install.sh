@@ -48,6 +48,7 @@ Commands:
   rescan              Run manual DNS rescan and switch to best server
   dashboard           Show client tunnel dashboard
   menu                Open interactive client monitor menu
+  m                   Short alias for menu
   status              Show current status
   logs                View tunnel logs (-f to follow)
   remove              Remove all tunnel components
@@ -68,6 +69,7 @@ Examples:
   slipstream-tunnel client --dns-file /tmp/dns-servers.txt
   slipstream-tunnel rescan
   slipstream-tunnel menu
+  sst
 EOF
   exit 0
 }
@@ -248,6 +250,7 @@ load_config_or_error() {
 
 install_self() {
   local install_path="/usr/local/bin/slipstream-tunnel"
+  local shortcut_path="/usr/local/bin/sst"
   local current_script=""
 
   if [[ -f "$0" ]]; then
@@ -267,6 +270,13 @@ install_self() {
 
   chmod +x "$install_path"
   log "Installed: slipstream-tunnel"
+
+  cat >"$shortcut_path" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/local/bin/slipstream-tunnel menu "$@"
+EOF
+  chmod +x "$shortcut_path"
+  log "Installed shortcut: sst"
 }
 
 # ============================================
@@ -596,6 +606,7 @@ cmd_client() {
   need_root
   check_dependencies curl tar systemctl awk sed grep head wc dig
   local domain="" dnscan_path="" slipstream_path="" port="7000" dns_file=""
+  local port_from_flag=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -617,6 +628,7 @@ cmd_client() {
     --port)
       require_flag_value "$1" "${2:-}"
       port="$2"
+      port_from_flag=true
       shift 2
       ;;
     --dns-file)
@@ -633,7 +645,6 @@ cmd_client() {
     esac
   done
 
-  validate_port_or_error "$port"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
   [[ -n "$dns_file" ]] && validate_dns_file_or_error "$dns_file"
 
@@ -684,6 +695,12 @@ cmd_client() {
     read -p "Enter tunnel domain (e.g., t.example.com): " domain
     validate_domain_or_error "$domain"
   fi
+
+  if [[ "$port_from_flag" == false ]]; then
+    read -r -p "Client tunnel listen port [7000]: " input_port
+    [[ -n "$input_port" ]] && port="$input_port"
+  fi
+  validate_port_or_error "$port"
 
   # Get slipstream binary (required for --verify)
   local slipstream_bin="$TUNNEL_DIR/slipstream-client"
@@ -884,9 +901,13 @@ EOF
   echo "  slipstream-tunnel rescan"
   echo "  slipstream-tunnel dashboard"
   echo "  slipstream-tunnel menu"
+  echo "  sst"
   echo "  journalctl -u slipstream-client -f"
   echo ""
   echo "Verified servers saved to: $SERVERS_FILE"
+  echo ""
+  log "Opening client monitor menu..."
+  cmd_menu
 }
 
 # ============================================
@@ -1230,6 +1251,11 @@ cmd_remove() {
     rm -f /usr/local/bin/slipstream-tunnel
   fi
 
+  if [[ -f /usr/local/bin/sst ]]; then
+    log "Removing sst shortcut..."
+    rm -f /usr/local/bin/sst
+  fi
+
   # Remove health check timer
   if [[ -f /etc/systemd/system/tunnel-health.timer ]]; then
     log "Removing health check timer..."
@@ -1291,7 +1317,7 @@ main() {
   health) cmd_health ;;
   rescan) cmd_rescan ;;
   dashboard) cmd_dashboard ;;
-  menu) cmd_menu ;;
+  menu | m) cmd_menu ;;
   status) cmd_status ;;
   logs)
     shift
