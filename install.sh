@@ -656,6 +656,70 @@ prompt_password_twice() {
   done
 }
 
+decode_base64_or_raw() {
+  local raw="$1" cleaned decoded
+  cleaned=$(printf "%s" "$raw" | tr -d " \t\r\n")
+  decoded=$(printf "%s" "$cleaned" | base64 -d 2>/dev/null || true)
+  if [[ -n "$decoded" ]]; then
+    printf "%s" "$decoded"
+  else
+    printf "%s" "$raw"
+  fi
+}
+
+test_client_ssh_auth_credentials() {
+  local username="$1" password="$2" transport_port="$3" local_port="$4" remote_app_port="$5"
+  validate_unix_username_or_error "$username"
+  validate_port_or_error "$transport_port"
+  validate_port_or_error "$local_port"
+  validate_port_or_error "$remote_app_port"
+  [[ -n "$password" ]] || error "SSH password cannot be empty"
+
+  check_dependencies ssh sshpass
+  mkdir -p "$SSH_CLIENT_ENV_DIR"
+  chmod 700 "$SSH_CLIENT_ENV_DIR"
+  touch "$SSH_CLIENT_ENV_DIR/known_hosts"
+  chmod 600 "$SSH_CLIENT_ENV_DIR/known_hosts"
+
+  log "Testing SSH credentials through tunnel transport..."
+  local probe_log probe_pid probe_rc=0 probe_tail=""
+  probe_log=$(mktemp /tmp/slipstream-ssh-probe.XXXXXX.log)
+  SSHPASS="$password" sshpass -e ssh -N \
+    -o ExitOnForwardFailure=yes \
+    -o ConnectTimeout=10 \
+    -o ServerAliveInterval=10 \
+    -o ServerAliveCountMax=1 \
+    -o TCPKeepAlive=yes \
+    -o NumberOfPasswordPrompts=1 \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$SSH_CLIENT_ENV_DIR/known_hosts" \
+    -L "127.0.0.1:${local_port}:127.0.0.1:${remote_app_port}" \
+    -p "$transport_port" "${username}@127.0.0.1" >"$probe_log" 2>&1 &
+  probe_pid=$!
+
+  sleep 4
+  if kill -0 "$probe_pid" 2>/dev/null; then
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    rm -f "$probe_log"
+    log "SSH credential test passed"
+    return 0
+  fi
+
+  wait "$probe_pid" 2>/dev/null || probe_rc=$?
+  if [[ -s "$probe_log" ]]; then
+    probe_tail=$(tail -n 3 "$probe_log" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
+  fi
+  rm -f "$probe_log"
+
+  if [[ -n "$probe_tail" ]]; then
+    error "SSH credential test failed (user/password/transport/app-port). Details: $probe_tail"
+  fi
+  error "SSH credential test failed (user/password/transport/app-port). Exit code: ${probe_rc}"
+}
+
 write_ssh_auth_config() {
   local tunnel_port="$1"
   validate_port_or_error "$tunnel_port"
@@ -1540,18 +1604,17 @@ cmd_client() {
   # Create systemd service
   log "Creating systemd service..."
   write_client_service "$best_server" "$domain" "$client_transport_port"
-  if [[ "$ssh_auth_client" == "true" ]]; then
-    write_ssh_client_env "$ssh_user" "$ssh_pass_b64" "$ssh_transport_port" "$port" "$ssh_remote_port"
-    write_ssh_client_service
-  fi
 
   systemctl daemon-reload
   systemctl enable slipstream-client
-  if [[ "$ssh_auth_client" == "true" ]]; then
-    systemctl enable "${SSH_CLIENT_SERVICE}"
-  fi
   systemctl restart slipstream-client
+
   if [[ "$ssh_auth_client" == "true" ]]; then
+    test_client_ssh_auth_credentials "$ssh_user" "$ssh_pass" "$ssh_transport_port" "$port" "$ssh_remote_port"
+    write_ssh_client_env "$ssh_user" "$ssh_pass_b64" "$ssh_transport_port" "$port" "$ssh_remote_port"
+    write_ssh_client_service
+    systemctl daemon-reload
+    systemctl enable "${SSH_CLIENT_SERVICE}"
     systemctl restart "${SSH_CLIENT_SERVICE}"
   fi
   log "Started slipstream-client service"
@@ -1980,6 +2043,7 @@ cmd_edit_client() {
   local new_ssh_pass_b64="${SSH_PASS_B64:-}"
   local new_ssh_remote_port="${SSH_REMOTE_APP_PORT:-2053}"
   local new_ssh_transport_port="${SSH_TRANSPORT_PORT:-17070}"
+  local new_ssh_pass_plain=""
   local input
 
   echo "=== Edit Client Settings ==="
@@ -2021,18 +2085,25 @@ cmd_edit_client() {
       plain_pass=$(prompt_password_twice "SSH password for ${new_ssh_user}")
       new_ssh_pass_b64=$(printf '%s' "$plain_pass" | base64 | tr -d '\n')
     fi
+    new_ssh_pass_plain=$(decode_base64_or_raw "$new_ssh_pass_b64")
+    [[ -n "$new_ssh_pass_plain" ]] || error "SSH password is empty after decode"
   fi
 
-  set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
-  set_config_value "PORT" "$new_port" "$CONFIG_FILE"
-  set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
   if [[ "$new_ssh_auth" == "true" ]]; then
+    write_client_service "$new_server" "$new_domain" "$new_ssh_transport_port"
+    systemctl daemon-reload
+    systemctl restart slipstream-client
+    systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
+    test_client_ssh_auth_credentials "$new_ssh_user" "$new_ssh_pass_plain" "$new_ssh_transport_port" "$new_port" "$new_ssh_remote_port"
+
+    set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
+    set_config_value "PORT" "$new_port" "$CONFIG_FILE"
+    set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
     set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
     set_config_value "SSH_AUTH_USER" "$new_ssh_user" "$CONFIG_FILE"
     set_config_value "SSH_PASS_B64" "$new_ssh_pass_b64" "$CONFIG_FILE"
     set_config_value "SSH_REMOTE_APP_PORT" "$new_ssh_remote_port" "$CONFIG_FILE"
     set_config_value "SSH_TRANSPORT_PORT" "$new_ssh_transport_port" "$CONFIG_FILE"
-    write_client_service "$new_server" "$new_domain" "$new_ssh_transport_port"
     write_ssh_client_env "$new_ssh_user" "$new_ssh_pass_b64" "$new_ssh_transport_port" "$new_port" "$new_ssh_remote_port"
     write_ssh_client_service
     SSH_AUTH_ENABLED="true"
@@ -2042,6 +2113,9 @@ cmd_edit_client() {
     set_config_value "SSH_PASS_B64" "" "$CONFIG_FILE"
     set_config_value "SSH_REMOTE_APP_PORT" "" "$CONFIG_FILE"
     set_config_value "SSH_TRANSPORT_PORT" "" "$CONFIG_FILE"
+    set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
+    set_config_value "PORT" "$new_port" "$CONFIG_FILE"
+    set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
     write_client_service "$new_server" "$new_domain" "$new_port"
     remove_ssh_client_service_if_present
     SSH_AUTH_ENABLED="false"
