@@ -852,7 +852,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 EnvironmentFile=$SSH_CLIENT_ENV_FILE
-ExecStart=/bin/bash -lc 'raw="\$SSH_TUNNEL_PASS_B64"; cleaned="\$(printf "%s" "\$raw" | tr -d " \t\r\n")"; pass="\$(printf "%s" "\$cleaned" | base64 -d 2>/dev/null || true)"; [[ -n "\$pass" ]] || pass="\$raw"; bind="\${SSH_LOCAL_BIND_ADDR:-0.0.0.0}"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$SSH_CLIENT_ENV_DIR/known_hosts -L \${bind}:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
+ExecStart=/bin/bash -lc 'raw="\$SSH_TUNNEL_PASS_B64"; cleaned="\$(printf "%%s" "\$raw" | tr -d " \t\r\n")"; pass="\$(printf "%%s" "\$cleaned" | base64 -d 2>/dev/null || true)"; [[ -n "\$pass" ]] || pass="\$raw"; bind="\${SSH_LOCAL_BIND_ADDR:-0.0.0.0}"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$SSH_CLIENT_ENV_DIR/known_hosts -L \${bind}:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
