@@ -178,13 +178,16 @@ package_for_command() {
     case "$manager" in
     apt-get) echo "openssh-client" ;;
     dnf | yum) echo "openssh-clients" ;;
-    zypper | pacman | apk) echo "openssh-client" ;;
+    zypper | pacman) echo "openssh" ;;
+    apk) echo "openssh-client" ;;
     esac
     ;;
   sshd)
     case "$manager" in
-    apt-get | zypper | pacman | apk) echo "openssh-server" ;;
+    apt-get) echo "openssh-server" ;;
     dnf | yum) echo "openssh-server" ;;
+    zypper | pacman) echo "openssh" ;;
+    apk) echo "openssh-server" ;;
     esac
     ;;
   sshpass)
@@ -393,7 +396,10 @@ ensure_service_user() {
 
 port_53_in_use() {
   if command -v ss &>/dev/null; then
-    ss -H -lntu | awk '$5 ~ /:53$/ {found=1} END {exit !found}'
+    if ss -H -lntu 'sport = :53' 2>/dev/null | awk 'NF {found=1} END {exit !found}'; then
+      return 0
+    fi
+    ss -H -lntu 2>/dev/null | awk '$5 ~ /:53$/ {found=1} END {exit !found}'
   elif command -v netstat &>/dev/null; then
     netstat -lntu 2>/dev/null | awk '$4 ~ /:53$/ {found=1} END {exit !found}'
   else
@@ -404,9 +410,9 @@ port_53_in_use() {
 port_53_owners() {
   if command -v ss &>/dev/null; then
     {
-      ss -H -ltnup 2>/dev/null
-      ss -H -lnuap 2>/dev/null
-    } | awk '$5 ~ /:53$/ {print}' | sort -u
+      ss -H -ltnup 'sport = :53' 2>/dev/null
+      ss -H -lnuap 'sport = :53' 2>/dev/null
+    } | awk 'NF {print}' | sort -u
   elif command -v netstat &>/dev/null; then
     netstat -lntup 2>/dev/null | awk '$4 ~ /:53$/ {print}'
   else
@@ -503,6 +509,23 @@ restore_resolver_if_backed_up() {
   if [[ -f "$RESOLV_BACKUP" ]]; then
     cp "$RESOLV_BACKUP" /etc/resolv.conf
     log "Restored /etc/resolv.conf from backup"
+  fi
+}
+
+ensure_static_resolver_config() {
+  local needs_write=false
+  if [[ ! -f /etc/resolv.conf || -L /etc/resolv.conf ]]; then
+    needs_write=true
+  else
+    local non_loopback_count
+    non_loopback_count=$(awk '/^[[:space:]]*nameserver[[:space:]]+/ {if ($2 !~ /^127\./) c++} END {print c+0}' /etc/resolv.conf 2>/dev/null || echo "0")
+    [[ "$non_loopback_count" -gt 0 ]] || needs_write=true
+  fi
+
+  if [[ "$needs_write" == true ]]; then
+    log "Writing static resolver configuration..."
+    rm -f /etc/resolv.conf
+    printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' >/etc/resolv.conf
   fi
 }
 
@@ -712,7 +735,9 @@ write_ssh_client_env() {
   validate_port_or_error "$remote_app_port"
   [[ -n "$password_b64" ]] || error "Missing encoded SSH password"
 
+  ensure_service_user
   mkdir -p "$SSH_CLIENT_ENV_DIR"
+  chown "$SERVICE_USER:$SERVICE_USER" "$SSH_CLIENT_ENV_DIR"
   chmod 700 "$SSH_CLIENT_ENV_DIR"
   cat >"$SSH_CLIENT_ENV_FILE" <<EOF
 SSH_TUNNEL_USER=$username
@@ -721,10 +746,12 @@ SSH_TRANSPORT_PORT=$transport_port
 SSH_LOCAL_PORT=$local_port
 SSH_REMOTE_APP_PORT=$remote_app_port
 EOF
+  chown "$SERVICE_USER:$SERVICE_USER" "$SSH_CLIENT_ENV_FILE"
   chmod 600 "$SSH_CLIENT_ENV_FILE"
 }
 
 write_ssh_client_service() {
+  ensure_service_user
   cat >/etc/systemd/system/${SSH_CLIENT_SERVICE}.service <<EOF
 [Unit]
 Description=Slipstream SSH Auth Overlay Client
@@ -733,8 +760,18 @@ Requires=slipstream-client.service
 
 [Service]
 Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
 EnvironmentFile=$SSH_CLIENT_ENV_FILE
 ExecStart=/bin/bash -lc 'pass="\$(printf "%s" "\$SSH_TUNNEL_PASS_B64" | base64 -d)"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -L 127.0.0.1:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ProtectHome=true
 Restart=always
 RestartSec=3
 
@@ -982,11 +1019,7 @@ cmd_server() {
   # Resolver changes are opt-in to avoid breaking host DNS unexpectedly.
   if [[ "$manage_resolver" == true ]]; then
     backup_resolver_if_needed
-    if [[ -L /etc/resolv.conf ]] || [[ ! -f /etc/resolv.conf ]]; then
-      log "Writing static resolver configuration..."
-      rm -f /etc/resolv.conf
-      echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" >/etc/resolv.conf
-    fi
+    ensure_static_resolver_config
   fi
 
   if [[ "$enable_ssh_auth" == false && -t 0 ]]; then
@@ -1062,6 +1095,9 @@ SSH_AUTH_ENABLED=$enable_ssh_auth
 SSH_BACKEND_PORT=$ssh_backend_port
 EOF
 
+  # Install global command early so recovery commands remain available on partial setup failures.
+  install_self
+
   if [[ "$enable_ssh_auth" == true ]]; then
     check_dependencies chpasswd usermod
     apply_ssh_auth_overlay "$port"
@@ -1090,9 +1126,6 @@ EOF
     set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
     set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
   fi
-
-  # Install global command
-  install_self
 
   echo ""
   echo -e "${GREEN}=== Server Ready ===${NC}"
