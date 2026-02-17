@@ -1234,7 +1234,7 @@ cmd_server() {
   done
 
   if [[ "$core_from_flag" == false && -t 0 ]]; then
-    slipstream_core=$(prompt_core_choice "$slipstream_core")
+    slipstream_core=$(prompt_core_choice "nightowl")
   fi
   set_slipstream_source "$slipstream_core"
   validate_port_or_error "$port"
@@ -1615,7 +1615,7 @@ cmd_client() {
   done
 
   if [[ "$core_from_flag" == false && -t 0 ]]; then
-    slipstream_core=$(prompt_core_choice "$slipstream_core")
+    slipstream_core=$(prompt_core_choice "nightowl")
   fi
   set_slipstream_source "$slipstream_core"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
