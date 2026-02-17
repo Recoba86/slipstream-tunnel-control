@@ -31,6 +31,7 @@ SSH_AUTH_CONFIG_FILE="$SSH_AUTH_CONFIG_DIR/99-slipstream-tunnel.conf"
 SSH_CLIENT_SERVICE="slipstream-ssh-client"
 SSH_CLIENT_ENV_DIR="/etc/slipstream-tunnel"
 SSH_CLIENT_ENV_FILE="$SSH_CLIENT_ENV_DIR/ssh-client.env"
+BBR_SYSCTL_FILE="/etc/sysctl.d/99-slipstream-tunnel-bbr.conf"
 
 # Colors
 RED='\033[0;31m'
@@ -69,6 +70,7 @@ Commands:
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
   auth-setup          Enable/update SSH auth overlay for server mode
+  auth-disable        Disable SSH auth overlay for server mode
   auth-add            Create SSH tunnel user (username/password)
   auth-passwd         Change SSH tunnel user password
   auth-del            Delete SSH tunnel user
@@ -527,6 +529,44 @@ ensure_static_resolver_config() {
     rm -f /etc/resolv.conf
     printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' >/etc/resolv.conf
   fi
+}
+
+enable_bbr_if_possible() {
+  if ! command -v sysctl &>/dev/null; then
+    warn "sysctl not found; skipping BBR tuning"
+    return 0
+  fi
+
+  if command -v modprobe &>/dev/null; then
+    modprobe tcp_bbr 2>/dev/null || true
+  fi
+
+  local available_cc
+  available_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)
+  if [[ "$available_cc" != *"bbr"* ]]; then
+    warn "Kernel does not expose BBR congestion control; skipping BBR tuning"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$BBR_SYSCTL_FILE")"
+  cat >"$BBR_SYSCTL_FILE" <<EOF
+# Managed by slipstream-tunnel
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+  if ! sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then
+    warn "Could not set net.core.default_qdisc=fq"
+  fi
+  if ! sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    warn "Could not set net.ipv4.tcp_congestion_control=bbr"
+    return 0
+  fi
+
+  local current_cc current_qdisc
+  current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+  current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+  log "TCP tuning active: congestion_control=${current_cc}, qdisc=${current_qdisc}"
 }
 
 set_config_value() {
@@ -1031,6 +1071,7 @@ cmd_server() {
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
 
   log "=== Slipstream Server Setup ==="
+  enable_bbr_if_possible
 
   # Get server IP with failover and validation
   log "Detecting server IP..."
@@ -1249,6 +1290,7 @@ EOF
   echo "  slipstream-tunnel stop"
   echo "  slipstream-tunnel start"
   echo "  slipstream-tunnel auth-add"
+  echo "  slipstream-tunnel auth-disable"
   echo "  slipstream-tunnel auth-list"
   echo "  slipstream-tunnel menu"
   echo "  sst"
@@ -1386,6 +1428,7 @@ cmd_client() {
   [[ -n "$dns_file" ]] && validate_dns_file_or_error "$dns_file"
 
   log "=== Slipstream Client Setup ==="
+  enable_bbr_if_possible
 
   ensure_service_user
   mkdir -p "$TUNNEL_DIR" "$DNSCAN_DIR"
@@ -2270,6 +2313,47 @@ cmd_auth_setup() {
   log "SSH auth overlay enabled. Users authenticate via SSH before reaching 127.0.0.1:$app_port."
 }
 
+cmd_auth_disable() {
+  need_root
+  check_dependencies systemctl
+  ensure_mode_server_or_error
+
+  if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
+    warn "SSH auth overlay is already disabled."
+    return 0
+  fi
+
+  local app_port="${PORT:-2053}"
+  local backup_file=""
+  if [[ -f "$SSH_AUTH_CONFIG_FILE" ]]; then
+    backup_file=$(mktemp /tmp/sshd-slipstream-disable.XXXXXX)
+    cp "$SSH_AUTH_CONFIG_FILE" "$backup_file"
+    rm -f "$SSH_AUTH_CONFIG_FILE"
+  fi
+
+  if command -v sshd &>/dev/null; then
+    if ! sshd -t; then
+      if [[ -n "$backup_file" && -f "$backup_file" ]]; then
+        cp "$backup_file" "$SSH_AUTH_CONFIG_FILE"
+      fi
+      [[ -n "$backup_file" ]] && rm -f "$backup_file"
+      error "SSH config became invalid after disabling overlay. Changes rolled back."
+    fi
+    local ssh_service
+    ssh_service=$(detect_ssh_service_name || true)
+    [[ -n "$ssh_service" ]] && systemctl restart "$ssh_service" || warn "Could not detect SSH service to restart"
+  fi
+  [[ -n "$backup_file" ]] && rm -f "$backup_file"
+
+  write_server_service "$DOMAIN" "$app_port"
+  systemctl daemon-reload
+  systemctl restart slipstream-server
+  set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
+  set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
+
+  log "SSH auth overlay disabled. Slipstream now forwards directly to 127.0.0.1:$app_port."
+}
+
 cmd_auth_add() {
   need_root
   check_dependencies getent awk tr chpasswd usermod
@@ -2413,7 +2497,8 @@ cmd_menu_server() {
     echo "9) Delete SSH tunnel user"
     echo "10) List SSH tunnel users"
     echo "11) Enable/update SSH auth overlay"
-    echo "12) Uninstall everything"
+    echo "12) Disable SSH auth overlay"
+    echo "13) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -2429,7 +2514,8 @@ cmd_menu_server() {
     9) cmd_auth_del ;;
     10) cmd_auth_list ;;
     11) cmd_auth_setup ;;
-    12)
+    12) cmd_auth_disable ;;
+    13)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -2752,6 +2838,7 @@ main() {
   servers) cmd_servers ;;
   menu | m) cmd_menu ;;
   auth-setup) cmd_auth_setup ;;
+  auth-disable) cmd_auth_disable ;;
   auth-add)
     shift
     cmd_auth_add "${1:-}"

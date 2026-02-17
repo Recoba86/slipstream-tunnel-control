@@ -303,3 +303,37 @@ EOF
   [[ "$output" == *"SSH_BACKEND_PORT=2222"* ]]
   [[ "$output" == *"SSH_AUTH_ENABLED=true"* ]]
 }
+
+@test "auth disable rewires server service to app port and updates config" {
+  cat >"${HOME}/.tunnel/config" <<'EOF'
+DOMAIN=t.example.com
+MODE=server
+PORT=2053
+SSH_AUTH_ENABLED=true
+SSH_BACKEND_PORT=22
+EOF
+
+  cat >"${BATS_TEST_TMPDIR}/run_auth_disable.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+check_dependencies() { :; }
+detect_ssh_service_name() { echo ssh; }
+sshd() { [[ "$1" == "-t" ]] && return 0; return 0; }
+systemctl() { echo "systemctl $*" >>"$MOCK_LOG"; return 0; }
+write_server_service() { echo "$1|$2" >"$HOME/.tunnel/server_service.args"; }
+SSH_AUTH_CONFIG_FILE="$HOME/.tunnel/99-slipstream-tunnel.conf"
+mkdir -p "$(dirname "$SSH_AUTH_CONFIG_FILE")"
+echo "# test" >"$SSH_AUTH_CONFIG_FILE"
+cmd_auth_disable
+cat "$HOME/.tunnel/server_service.args"
+grep '^SSH_AUTH_ENABLED=false$' "$HOME/.tunnel/config"
+grep '^SSH_BACKEND_PORT=$' "$HOME/.tunnel/config"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_auth_disable.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_auth_disable.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"t.example.com|2053"* ]]
+  [[ "$output" == *"SSH_AUTH_ENABLED=false"* ]]
+}

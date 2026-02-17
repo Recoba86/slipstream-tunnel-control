@@ -27,6 +27,7 @@ setup() {
   [[ "$output" == *"servers"* ]]
   [[ "$output" == *"menu"* ]]
   [[ "$output" == *"auth-setup"* ]]
+  [[ "$output" == *"auth-disable"* ]]
   [[ "$output" == *"auth-add"* ]]
   [[ "$output" == *"auth-passwd"* ]]
   [[ "$output" == *"auth-del"* ]]
