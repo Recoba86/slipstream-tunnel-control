@@ -85,6 +85,10 @@ Commands:
   instance-stop       Stop one extra client instance
   instance-restart    Restart one extra client instance
   instance-logs       View logs for one extra client instance (-f to follow)
+  instance-servers    Show DNS candidates for one extra client instance
+  instance-select     Manually switch DNS resolver for one extra client instance
+  instance-rescan     Run DNS rescan for one extra client instance
+  instance-edit       Edit one extra client instance (domain/port/resolver)
   instance-del        Delete one extra client instance
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
@@ -133,6 +137,7 @@ Examples:
   slipstream-tunnel instance-add dubai
   slipstream-tunnel instance-list
   slipstream-tunnel instance-status dubai
+  slipstream-tunnel instance-select dubai
   slipstream-tunnel menu
   slipstream-tunnel speed-profile fast
   slipstream-tunnel core-switch plus
@@ -960,6 +965,12 @@ set_config_value() {
   else
     echo "${key}=${value}" >>"$file"
   fi
+}
+
+config_value_from_file() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 1
+  awk -F= -v key="$key" '$1==key {print substr($0, index($0, "=") + 1); exit}' "$file"
 }
 
 sed_in_place() {
@@ -2713,6 +2724,215 @@ cmd_instance_logs() {
   fi
 }
 
+cmd_instance_servers() {
+  check_dependencies dig
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-servers <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+
+  local servers_file
+  servers_file=$(instance_servers_file "$instance")
+  [[ -s "$servers_file" ]] || error "No verified DNS server list found for instance: $instance"
+
+  echo "=== Verified DNS Servers (Instance: $instance) ==="
+  printf "%-16s %-12s %-12s %s\n" "IP" "Ping(ms)" "DNS(ms)" "Status"
+
+  local server ping_ms dns_ms status
+  while IFS= read -r server; do
+    [[ -z "$server" ]] && continue
+    is_valid_ipv4 "$server" || continue
+    ping_ms=$(ping_rtt_ms "$server")
+    dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
+    if [[ "$dns_ms" -lt 1000 ]]; then
+      status="OK"
+    else
+      status="SLOW/FAIL"
+    fi
+    printf "%-16s %-12s %-12s %s\n" "$server" "$ping_ms" "$dns_ms" "$status"
+  done <"$servers_file"
+}
+
+cmd_instance_select_server() {
+  need_root
+  check_dependencies systemctl dig
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-select <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+
+  local cfg servers_file
+  cfg=$(instance_config_file "$instance")
+  servers_file=$(instance_servers_file "$instance")
+  [[ -s "$servers_file" ]] || error "No verified DNS server list found for instance: $instance"
+
+  local servers=()
+  local server
+  while IFS= read -r server; do
+    [[ -z "$server" ]] && continue
+    is_valid_ipv4 "$server" || continue
+    servers+=("$server")
+  done <"$servers_file"
+  [[ ${#servers[@]} -gt 0 ]] || error "No valid DNS IP entries found in $servers_file"
+
+  echo "=== Manual DNS Selection (Instance: $instance) ==="
+  local i=1 ping_ms dns_ms status
+  for server in "${servers[@]}"; do
+    ping_ms=$(ping_rtt_ms "$server")
+    dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
+    if [[ "$dns_ms" -lt 1000 ]]; then
+      status="OK"
+    else
+      status="SLOW/FAIL"
+    fi
+    printf "%2d) %-15s ping=%-10s dns=%-8s %s\n" "$i" "$server" "$ping_ms" "$dns_ms" "$status"
+    i=$((i + 1))
+  done
+
+  echo " 0) Cancel"
+  read -r -p "Choose DNS index: " choice
+  [[ -n "${choice:-}" ]] || {
+    warn "No selection made"
+    return 0
+  }
+  [[ "$choice" =~ ^[0-9]+$ ]] || error "Invalid selection: $choice"
+  [[ "$choice" == "0" ]] && {
+    echo "Canceled"
+    return 0
+  }
+  ((choice >= 1 && choice <= ${#servers[@]})) || error "Selection out of range: $choice"
+
+  local selected="${servers[$((choice - 1))]}"
+  set_config_value "CURRENT_SERVER" "$selected" "$cfg"
+  write_instance_client_service "$instance" "$selected" "$DOMAIN" "$PORT"
+  systemctl daemon-reload
+  restart_instance_stack "$instance"
+  log "Instance '$instance' switched to DNS server: $selected"
+  cmd_instance_status "$instance"
+}
+
+cmd_instance_rescan() {
+  need_root
+  check_dependencies dig systemctl wc head
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-rescan <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+  [[ "${MODE:-}" == "client" ]] || error "Instance '$instance' is not in client mode"
+  [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
+  [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || error "slipstream-client not installed"
+
+  local cfg servers_file
+  cfg=$(instance_config_file "$instance")
+  servers_file=$(instance_servers_file "$instance")
+
+  local dnscan_args=(
+    --domain "$DOMAIN"
+    --data-dir "$DNSCAN_DIR/data"
+    --output "$servers_file"
+    --verify "$SLIPSTREAM_CLIENT_BIN"
+  )
+
+  local scan_source="${SCAN_SOURCE:-file}"
+  local scan_workers="${SCAN_WORKERS:-500}"
+  local scan_timeout="${SCAN_TIMEOUT:-2s}"
+  local scan_threshold="${SCAN_THRESHOLD:-50}"
+
+  if [[ "$scan_source" == "file" ]]; then
+    local scan_file="${SCAN_DNS_FILE:-$servers_file}"
+    validate_dns_file_or_error "$scan_file"
+    dnscan_args+=(--file "$scan_file")
+  else
+    dnscan_args+=(
+      --country "${SCAN_COUNTRY:-ir}"
+      --mode "${SCAN_MODE:-fast}"
+    )
+  fi
+  dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
+
+  log "Running manual DNS rescan for instance '$instance'..."
+  "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+  [[ -s "$servers_file" ]] || error "Manual rescan found no verified DNS servers for instance '$instance'"
+
+  local best_server best_latency
+  read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$servers_file")"
+  [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan for '$instance'"
+
+  set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
+  write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT"
+  systemctl daemon-reload
+  restart_instance_stack "$instance"
+  log "Instance '$instance' switched to best DNS server: $best_server (${best_latency}ms)"
+  cmd_instance_servers "$instance"
+}
+
+cmd_instance_edit() {
+  need_root
+  check_dependencies systemctl ss
+  local instance="${1:-}" input
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-edit <name>"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+  [[ "${MODE:-}" == "client" ]] || error "Instance '$instance' is not in client mode"
+
+  local cfg servers_file old_port new_domain new_port new_server
+  cfg=$(instance_config_file "$instance")
+  servers_file=$(instance_servers_file "$instance")
+  old_port="${PORT:-7001}"
+  new_domain="${DOMAIN:-}"
+  new_port="${PORT:-7001}"
+  new_server="${CURRENT_SERVER:-}"
+
+  echo "=== Edit Client Instance: $instance ==="
+  read -r -p "Domain [$new_domain]: " input
+  [[ -n "$input" ]] && new_domain="$input"
+  read -r -p "Local listen port [$new_port]: " input
+  [[ -n "$input" ]] && new_port="$input"
+  read -r -p "DNS resolver IP [$new_server]: " input
+  [[ -n "$input" ]] && new_server="$input"
+
+  validate_domain_or_error "$new_domain"
+  validate_port_or_error "$new_port"
+  if [[ "$new_port" != "$old_port" ]] && port_in_use "$new_port"; then
+    error "Port $new_port is already in use on this host"
+  fi
+  if [[ -z "$new_server" ]]; then
+    prompt_instance_resolver_or_error new_server "$new_domain"
+  else
+    validate_ipv4_or_error "$new_server"
+  fi
+
+  mkdir -p "$(dirname "$servers_file")"
+  local tmp_servers
+  tmp_servers=$(mktemp /tmp/instance-servers.XXXXXX.txt)
+  {
+    echo "$new_server"
+    if [[ -f "$servers_file" ]]; then
+      while IFS= read -r input; do
+        [[ -n "$input" ]] || continue
+        is_valid_ipv4 "$input" || continue
+        [[ "$input" == "$new_server" ]] && continue
+        echo "$input"
+      done <"$servers_file"
+    fi
+  } >"$tmp_servers"
+  mv "$tmp_servers" "$servers_file"
+
+  set_config_value "DOMAIN" "$new_domain" "$cfg"
+  set_config_value "PORT" "$new_port" "$cfg"
+  set_config_value "CURRENT_SERVER" "$new_server" "$cfg"
+  if [[ "${SCAN_SOURCE:-file}" == "file" ]]; then
+    set_config_value "SCAN_DNS_FILE" "$servers_file" "$cfg"
+  fi
+
+  write_instance_client_service "$instance" "$new_server" "$new_domain" "$new_port"
+  setup_instance_timers "$instance"
+  systemctl daemon-reload
+  restart_instance_stack "$instance"
+  log "Instance '$instance' updated"
+  cmd_instance_status "$instance"
+}
+
 cmd_instance_del() {
   need_root
   check_dependencies systemctl rm
@@ -3564,6 +3784,258 @@ prompt_instance_name_from_menu() {
   echo "$instance"
 }
 
+collect_client_tunnel_targets() {
+  echo "default"
+  if [[ -d "$INSTANCES_DIR" ]]; then
+    local cfg
+    for cfg in "$INSTANCES_DIR"/*/config; do
+      [[ -f "$cfg" ]] || continue
+      basename "$(dirname "$cfg")"
+    done
+  fi
+}
+
+tunnel_config_file_for_target() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    echo "$CONFIG_FILE"
+  else
+    instance_config_file "$target"
+  fi
+}
+
+tunnel_service_name_for_target() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    echo "slipstream-client"
+  else
+    instance_client_service "$target"
+  fi
+}
+
+cmd_tunnels_overview() {
+  check_dependencies systemctl
+  ensure_mode_client_or_error
+
+  echo "=== Tunnel Overview ==="
+  printf "%-12s %-8s %-10s %-6s %-15s %s\n" "Name" "Type" "Service" "Port" "Resolver" "Domain"
+
+  local target cfg service type state domain port resolver
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    cfg=$(tunnel_config_file_for_target "$target")
+    [[ -f "$cfg" ]] || continue
+    service=$(tunnel_service_name_for_target "$target")
+    state=$(service_state "$service")
+    domain=$(config_value_from_file "$cfg" "DOMAIN" || echo "unknown")
+    port=$(config_value_from_file "$cfg" "PORT" || echo "unknown")
+    resolver=$(config_value_from_file "$cfg" "CURRENT_SERVER" || true)
+    [[ -n "$resolver" ]] || resolver="-"
+    if [[ "$target" == "default" ]]; then
+      type="main"
+    else
+      type="extra"
+    fi
+    printf "%-12s %-8s %-10s %-6s %-15s %s\n" "$target" "$type" "$state" "$port" "$resolver" "$domain"
+  done < <(collect_client_tunnel_targets)
+}
+
+prompt_tunnel_target_from_menu() {
+  local include_default="${1:-true}"
+  local targets=() target cfg service state port resolver
+
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    if [[ "$include_default" != "true" && "$target" == "default" ]]; then
+      continue
+    fi
+    targets+=("$target")
+  done < <(collect_client_tunnel_targets)
+
+  if [[ ${#targets[@]} -eq 0 ]]; then
+    warn "No tunnel targets available"
+    return 1
+  fi
+
+  echo "Select tunnel target:"
+  local i=1
+  for target in "${targets[@]}"; do
+    cfg=$(tunnel_config_file_for_target "$target")
+    service=$(tunnel_service_name_for_target "$target")
+    state=$(service_state "$service")
+    port=$(config_value_from_file "$cfg" "PORT" || echo "unknown")
+    resolver=$(config_value_from_file "$cfg" "CURRENT_SERVER" || true)
+    [[ -n "$resolver" ]] || resolver="-"
+    printf " %2d) %-12s service=%-10s port=%-6s resolver=%s\n" "$i" "$target" "$state" "$port" "$resolver"
+    i=$((i + 1))
+  done
+  echo "  0) Cancel"
+
+  local choice=""
+  read -r -p "Select: " choice
+  [[ -n "$choice" ]] || return 1
+  [[ "$choice" =~ ^[0-9]+$ ]] || {
+    warn "Invalid selection: $choice"
+    return 1
+  }
+  [[ "$choice" == "0" ]] && return 1
+  ((choice >= 1 && choice <= ${#targets[@]})) || {
+    warn "Selection out of range: $choice"
+    return 1
+  }
+
+  echo "${targets[$((choice - 1))]}"
+}
+
+cmd_tunnel_status() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_status
+  else
+    cmd_instance_status "$target"
+  fi
+}
+
+cmd_tunnel_start() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_start
+  else
+    cmd_instance_start "$target"
+  fi
+}
+
+cmd_tunnel_stop() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_stop
+  else
+    cmd_instance_stop "$target"
+  fi
+}
+
+cmd_tunnel_restart() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_restart
+  else
+    cmd_instance_restart "$target"
+  fi
+}
+
+cmd_tunnel_logs_follow() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_logs -f
+  else
+    cmd_instance_logs "$target" -f
+  fi
+}
+
+cmd_tunnel_health() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_health
+  else
+    cmd_instance_health "$target"
+  fi
+}
+
+cmd_tunnel_watchdog() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_watchdog
+  else
+    cmd_instance_watchdog "$target"
+  fi
+}
+
+cmd_tunnel_servers() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_servers
+  else
+    cmd_instance_servers "$target"
+  fi
+}
+
+cmd_tunnel_select_dns() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_select_server
+  else
+    cmd_instance_select_server "$target"
+  fi
+}
+
+cmd_tunnel_rescan() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_rescan
+  else
+    cmd_instance_rescan "$target"
+  fi
+}
+
+cmd_tunnel_edit() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_edit_client
+  else
+    cmd_instance_edit "$target"
+  fi
+}
+
+cmd_menu_manage_single_tunnel() {
+  local target="$1"
+  while true; do
+    echo ""
+    echo "=== Tunnel Actions: $target ==="
+    echo "1) Show tunnel status"
+    echo "2) Start tunnel service"
+    echo "3) Stop tunnel service"
+    echo "4) Restart tunnel service"
+    echo "5) Follow tunnel logs"
+    echo "6) Run health check now"
+    echo "7) Run runtime watchdog now"
+    echo "8) Show DNS candidates"
+    echo "9) Switch DNS resolver"
+    echo "10) Run DNS rescan and switch best"
+    echo "11) Edit tunnel settings"
+    if [[ "$target" != "default" ]]; then
+      echo "12) Delete this tunnel instance"
+    fi
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    case "$choice" in
+    1) cmd_tunnel_status "$target" ;;
+    2) cmd_tunnel_start "$target" ;;
+    3) cmd_tunnel_stop "$target" ;;
+    4) cmd_tunnel_restart "$target" ;;
+    5) cmd_tunnel_logs_follow "$target" ;;
+    6) cmd_tunnel_health "$target" ;;
+    7) cmd_tunnel_watchdog "$target" ;;
+    8) cmd_tunnel_servers "$target" ;;
+    9) cmd_tunnel_select_dns "$target" ;;
+    10) cmd_tunnel_rescan "$target" ;;
+    11) cmd_tunnel_edit "$target" ;;
+    12)
+      if [[ "$target" == "default" ]]; then
+        warn "Default tunnel cannot be deleted"
+        continue
+      fi
+      read -r -p "Delete instance '$target'? (y/n): " confirm_delete
+      [[ "$confirm_delete" == "y" ]] || continue
+      cmd_instance_del "$target"
+      break
+      ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
 cmd_menu_client() {
   while true; do
     echo ""
@@ -3599,51 +4071,29 @@ cmd_menu_client_instances() {
   while true; do
     echo ""
     echo "=== Manage Tunnels Submenu ==="
-    echo "1) Add new tunnel instance"
-    echo "2) List tunnel instances"
-    echo "3) Show one instance status"
-    echo "4) Start one instance"
-    echo "5) Stop one instance"
-    echo "6) Restart one instance"
-    echo "7) Follow one instance logs"
-    echo "8) Delete one instance"
+    echo "1) Show all tunnels overview"
+    echo "2) Manage one tunnel (main + instances)"
+    echo "3) Add new tunnel instance"
+    echo "4) List extra tunnel instances"
+    echo "5) Delete one extra tunnel instance"
     echo "0) Back"
     read -r -p "Select: " choice
 
-    local instance=""
+    local instance="" target=""
     case "$choice" in
-    1)
+    1) cmd_tunnels_overview ;;
+    2)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_menu_manage_single_tunnel "$target"
+      fi
+      ;;
+    3)
       if instance=$(prompt_instance_name_from_menu); then
         cmd_instance_add "$instance"
       fi
       ;;
-    2) cmd_instance_list ;;
-    3)
-      if instance=$(prompt_instance_name_from_menu); then
-        cmd_instance_status "$instance"
-      fi
-      ;;
-    4)
-      if instance=$(prompt_instance_name_from_menu); then
-        cmd_instance_start "$instance"
-      fi
-      ;;
+    4) cmd_instance_list ;;
     5)
-      if instance=$(prompt_instance_name_from_menu); then
-        cmd_instance_stop "$instance"
-      fi
-      ;;
-    6)
-      if instance=$(prompt_instance_name_from_menu); then
-        cmd_instance_restart "$instance"
-      fi
-      ;;
-    7)
-      if instance=$(prompt_instance_name_from_menu); then
-        cmd_instance_logs "$instance" -f
-      fi
-      ;;
-    8)
       if instance=$(prompt_instance_name_from_menu); then
         read -r -p "Delete instance '$instance'? (y/n): " confirm_delete
         [[ "$confirm_delete" == "y" ]] || continue
@@ -4254,6 +4704,22 @@ main() {
   instance-logs)
     shift
     cmd_instance_logs "${1:-}" "${2:-}"
+    ;;
+  instance-servers)
+    shift
+    cmd_instance_servers "${1:-}"
+    ;;
+  instance-select | instance-select-server)
+    shift
+    cmd_instance_select_server "${1:-}"
+    ;;
+  instance-rescan)
+    shift
+    cmd_instance_rescan "${1:-}"
+    ;;
+  instance-edit)
+    shift
+    cmd_instance_edit "${1:-}"
     ;;
   instance-del)
     shift
