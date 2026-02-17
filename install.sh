@@ -682,7 +682,7 @@ test_client_ssh_auth_credentials() {
   chmod 600 "$SSH_CLIENT_ENV_DIR/known_hosts"
 
   log "Testing SSH credentials through tunnel transport..."
-  local attempt max_attempts=8
+  local attempt max_attempts=10
   local probe_log probe_pid probe_rc=0 probe_tail=""
 
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
@@ -719,10 +719,18 @@ test_client_ssh_auth_credentials() {
     fi
     rm -f "$probe_log"
 
-    if [[ "$attempt" -lt "$max_attempts" && "$probe_tail" == *"Connection refused"* ]]; then
-      warn "SSH transport is not ready yet (attempt ${attempt}/${max_attempts}), retrying..."
-      sleep 2
-      continue
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      if [[ "$probe_tail" == *"Permission denied"* || "$probe_tail" == *"Authentication failed"* ]]; then
+        error "SSH credential test failed: authentication rejected for user '${username}'. Update password on server or use the correct one."
+      fi
+      if [[ "$probe_tail" == *"administratively prohibited"* || "$probe_tail" == *"open failed"* ]]; then
+        error "SSH credential test failed: server denied TCP forward to 127.0.0.1:${remote_app_port}. Check SSH overlay/PermitOpen on server."
+      fi
+      if [[ "$probe_tail" == *"Connection refused"* || "$probe_tail" == *"Connection closed"* || "$probe_tail" == *"timed out"* ]]; then
+        warn "SSH transport/auth path is not ready yet (attempt ${attempt}/${max_attempts}), retrying..."
+        sleep 2
+        continue
+      fi
     fi
 
     if [[ -n "$probe_tail" ]]; then
@@ -731,7 +739,7 @@ test_client_ssh_auth_credentials() {
     error "SSH credential test failed (user/password/transport/app-port). Exit code: ${probe_rc}"
   done
 
-  error "SSH credential test failed after ${max_attempts} attempts (transport readiness timeout)"
+  error "SSH credential test failed after ${max_attempts} attempts (transport/auth path timeout)"
 }
 
 write_ssh_auth_config() {
