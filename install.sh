@@ -421,7 +421,7 @@ prompt_read() {
   local out_var="$1" prompt="$2" input=""
   if [[ -t 0 ]]; then
     read -r -p "$prompt" input
-  elif [[ -r /dev/tty ]]; then
+  elif [[ -e /dev/tty ]] && : </dev/tty 2>/dev/null; then
     read -r -p "$prompt" input </dev/tty
   else
     error "Interactive input required but no TTY is available. Run: curl ... -o /tmp/slipstream-install.sh && bash /tmp/slipstream-install.sh ..."
@@ -1808,7 +1808,7 @@ find_best_server() {
 }
 
 has_interactive_tty() {
-  [[ -t 0 || -r /dev/tty ]]
+  [[ -t 0 ]] || ([[ -e /dev/tty ]] && : </dev/tty 2>/dev/null)
 }
 
 prompt_scan_settings_for_profile() {
@@ -2504,53 +2504,66 @@ cmd_rescan() {
 
 cmd_dashboard() {
   check_dependencies systemctl date
-  load_config_or_error
-  [[ "${MODE:-}" == "client" ]] || error "Dashboard is available only in client mode"
+  ensure_mode_client_or_error
 
-  local service_status timer_status current_latency now ssh_status
-  service_status=$(service_state "slipstream-client")
-  timer_status=$(service_state "tunnel-health.timer")
-  ssh_status="disabled"
-  if client_ssh_auth_enabled; then
-    ssh_status=$(service_state "${SSH_CLIENT_SERVICE}")
-  fi
+  local now
   now=$(date '+%Y-%m-%d %H:%M:%S')
-
   echo "=== Client Dashboard ==="
   echo "Time: $now"
-  echo "Service: $service_status"
-  echo "SSH overlay service: $ssh_status"
-  echo "Health timer: $timer_status"
-  echo "Domain: ${DOMAIN:-unknown}"
-  echo "Port: ${PORT:-7000}"
-  echo "Current DNS: ${CURRENT_SERVER:-unknown}"
-  echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
+  echo ""
+  printf "%-12s %-8s %-10s %-10s %-10s %-6s %-15s %-8s %s\n" \
+    "Name" "Type" "Service" "Health" "Watchdog" "Port" "Resolver" "DNSms" "Domain"
 
-  if [[ -n "${CURRENT_SERVER:-}" ]] && command -v dig &>/dev/null; then
-    current_latency=$(test_dns_latency "$CURRENT_SERVER" "$DOMAIN" || echo "9999")
-    echo "Current latency: ${current_latency}ms"
-  else
-    echo "Current latency: unavailable (dig missing or server unknown)"
-  fi
+  local target cfg type service health_timer watchdog_timer domain port resolver state health_state watchdog_state latency
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    cfg=$(tunnel_config_file_for_target "$target")
+    [[ -f "$cfg" ]] || continue
+    service=$(tunnel_service_name_for_target "$target")
+    if [[ "$target" == "default" ]]; then
+      type="main"
+      health_timer="tunnel-health.timer"
+      watchdog_timer="tunnel-watchdog.timer"
+    else
+      type="extra"
+      health_timer=$(instance_health_timer "$target")
+      watchdog_timer=$(instance_watchdog_timer "$target")
+    fi
 
-  if [[ -s "$SERVERS_FILE" && -n "${DOMAIN:-}" ]]; then
-    echo ""
-    echo "Top DNS candidates (live check):"
-    local shown=0 server lat
-    while IFS= read -r server; do
-      [[ -z "$server" ]] && continue
-      is_valid_ipv4 "$server" || continue
-      lat=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
-      printf "  %-15s %sms\n" "$server" "$lat"
-      shown=$((shown + 1))
-      [[ "$shown" -ge 5 ]] && break
-    done <"$SERVERS_FILE"
-  fi
+    state=$(service_state "$service")
+    health_state=$(service_state "$health_timer")
+    watchdog_state=$(service_state "$watchdog_timer")
+    domain=$(config_value_from_file "$cfg" "DOMAIN" || echo "-")
+    port=$(config_value_from_file "$cfg" "PORT" || echo "-")
+    resolver=$(config_value_from_file "$cfg" "CURRENT_SERVER" || true)
+    [[ -n "$resolver" ]] || resolver="-"
+    latency="-"
+    if [[ "$resolver" != "-" && -n "$domain" ]] && command -v dig &>/dev/null; then
+      latency=$(test_dns_latency "$resolver" "$domain" || echo "9999")
+    fi
+
+    printf "%-12s %-8s %-10s %-10s %-10s %-6s %-15s %-8s %s\n" \
+      "$target" "$type" "$state" "$health_state" "$watchdog_state" "$port" "$resolver" "$latency" "$domain"
+  done < <(collect_client_tunnel_targets)
 
   if [[ -f "$HEALTH_LOG" ]]; then
     echo ""
-    echo "Recent health events:"
+    echo "Main tunnel recent health events:"
     tail -5 "$HEALTH_LOG" | sed 's/^/  /'
+  fi
+
+  if [[ -d "$INSTANCES_DIR" ]]; then
+    local hcfg instance hlog
+    for hcfg in "$INSTANCES_DIR"/*/config; do
+      [[ -f "$hcfg" ]] || continue
+      instance=$(basename "$(dirname "$hcfg")")
+      hlog=$(instance_health_log "$instance")
+      if [[ -f "$hlog" ]]; then
+        echo ""
+        echo "Instance '$instance' recent health events:"
+        tail -3 "$hlog" | sed 's/^/  /'
+      fi
+    done
   fi
 }
 
@@ -4187,20 +4200,43 @@ cmd_menu_client_monitor() {
   while true; do
     echo ""
     echo "=== Client Monitoring Submenu ==="
-    echo "1) Run health check now"
-    echo "2) Run full DNS rescan now"
-    echo "3) Show verified DNS IP list (live ping + DNS latency)"
-    echo "4) Select DNS manually from verified list"
-    echo "5) Show status"
+    echo "1) Run health check now (choose tunnel)"
+    echo "2) Run full DNS rescan now (choose tunnel)"
+    echo "3) Show verified DNS IP list (choose tunnel)"
+    echo "4) Select DNS manually from verified list (choose tunnel)"
+    echo "5) Show status (choose tunnel)"
+    echo "6) Show all tunnels overview"
     echo "0) Back"
     read -r -p "Select: " choice
 
+    local target=""
     case "$choice" in
-    1) cmd_health ;;
-    2) cmd_rescan ;;
-    3) cmd_servers ;;
-    4) cmd_select_server ;;
-    5) cmd_status ;;
+    1)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_health "$target"
+      fi
+      ;;
+    2)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_rescan "$target"
+      fi
+      ;;
+    3)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_servers "$target"
+      fi
+      ;;
+    4)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_select_dns "$target"
+      fi
+      ;;
+    5)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_status "$target"
+      fi
+      ;;
+    6) cmd_tunnels_overview ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
@@ -4211,20 +4247,43 @@ cmd_menu_client_service() {
   while true; do
     echo ""
     echo "=== Client Service Submenu ==="
-    echo "1) Start client tunnel service"
-    echo "2) Stop client tunnel service"
-    echo "3) Restart client tunnel service"
-    echo "4) Follow client logs"
-    echo "5) Show status"
+    echo "1) Start tunnel service (choose tunnel)"
+    echo "2) Stop tunnel service (choose tunnel)"
+    echo "3) Restart tunnel service (choose tunnel)"
+    echo "4) Follow tunnel logs (choose tunnel)"
+    echo "5) Show status (choose tunnel)"
+    echo "6) Show all tunnels overview"
     echo "0) Back"
     read -r -p "Select: " choice
 
+    local target=""
     case "$choice" in
-    1) cmd_start ;;
-    2) cmd_stop ;;
-    3) cmd_restart ;;
-    4) cmd_logs -f ;;
-    5) cmd_status ;;
+    1)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_start "$target"
+      fi
+      ;;
+    2)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_stop "$target"
+      fi
+      ;;
+    3)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_restart "$target"
+      fi
+      ;;
+    4)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_logs_follow "$target"
+      fi
+      ;;
+    5)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_status "$target"
+      fi
+      ;;
+    6) cmd_tunnels_overview ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
@@ -4235,16 +4294,17 @@ cmd_menu_client_auth() {
   while true; do
     echo ""
     echo "=== Client Auth/Profile Submenu ==="
-    echo "1) Enable client SSH auth overlay"
-    echo "2) Disable client SSH auth overlay"
-    echo "3) Set speed profile secure"
-    echo "4) Set speed profile fast"
-    echo "5) Show speed profile status"
-    echo "6) Switch core (nightowl/plus)"
-    echo "7) Edit client settings (domain/port/resolver/auth)"
+    echo "1) Enable client SSH auth overlay (main tunnel)"
+    echo "2) Disable client SSH auth overlay (main tunnel)"
+    echo "3) Set speed profile secure (main tunnel)"
+    echo "4) Set speed profile fast (main tunnel)"
+    echo "5) Show speed profile status (main tunnel)"
+    echo "6) Switch core (nightowl/plus, shared client binary)"
+    echo "7) Edit one tunnel settings (main + instances)"
     echo "0) Back"
     read -r -p "Select: " choice
 
+    local target=""
     case "$choice" in
     1) cmd_client_auth_enable ;;
     2) cmd_client_auth_disable ;;
@@ -4252,7 +4312,11 @@ cmd_menu_client_auth() {
     4) cmd_speed_profile fast ;;
     5) cmd_speed_profile status ;;
     6) cmd_core_switch ;;
-    7) cmd_edit_client ;;
+    7)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_edit "$target"
+      fi
+      ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
@@ -4378,8 +4442,14 @@ resolver_answers_dns_queries() {
 
 setup_health_timer_named() {
   local service_name="$1" timer_name="$2" exec_command="$3"
+  local unit_dir="/etc/systemd/system"
 
-  cat >"/etc/systemd/system/${service_name}.service" <<EOF
+  if [[ ! -d "$unit_dir" || ! -w "$unit_dir" ]]; then
+    warn "Skipping health timer unit setup: $unit_dir is not writable"
+    return 0
+  fi
+
+  cat >"${unit_dir}/${service_name}.service" <<EOF
 [Unit]
 Description=DNS Tunnel Health Check (${service_name})
 After=network.target
@@ -4389,7 +4459,7 @@ Type=oneshot
 ExecStart=$exec_command
 EOF
 
-  cat >"/etc/systemd/system/${timer_name}" <<EOF
+  cat >"${unit_dir}/${timer_name}" <<EOF
 [Unit]
 Description=DNS Tunnel Health Check Timer (${timer_name})
 
@@ -4413,8 +4483,14 @@ setup_health_timer() {
 
 setup_watchdog_timer_named() {
   local service_name="$1" timer_name="$2" exec_command="$3"
+  local unit_dir="/etc/systemd/system"
 
-  cat >"/etc/systemd/system/${service_name}.service" <<EOF
+  if [[ ! -d "$unit_dir" || ! -w "$unit_dir" ]]; then
+    warn "Skipping runtime watchdog unit setup: $unit_dir is not writable"
+    return 0
+  fi
+
+  cat >"${unit_dir}/${service_name}.service" <<EOF
 [Unit]
 Description=DNS Tunnel Runtime Watchdog (${service_name})
 After=network.target
@@ -4424,7 +4500,7 @@ Type=oneshot
 ExecStart=$exec_command
 EOF
 
-  cat >"/etc/systemd/system/${timer_name}" <<EOF
+  cat >"${unit_dir}/${timer_name}" <<EOF
 [Unit]
 Description=DNS Tunnel Runtime Watchdog Timer (${timer_name})
 
