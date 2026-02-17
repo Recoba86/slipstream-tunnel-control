@@ -105,3 +105,8 @@ setup() {
   run bash -lc "source '$SCRIPT'; systemctl(){ [[ \"\$1\" == 'is-active' ]] && { echo activating; return 3; }; }; out=\$(service_state slipstream-ssh-client); [[ \"\$out\" == 'activating' ]]"
   [ "$status" -eq 0 ]
 }
+
+@test "core prompt command substitution returns clean token on Enter default" {
+  run bash -lc "source '$SCRIPT'; out=\$(prompt_core_choice nightowl <<< \$'\\n'); [[ \"\$out\" == 'nightowl' ]]"
+  [ "$status" -eq 0 ]
+}

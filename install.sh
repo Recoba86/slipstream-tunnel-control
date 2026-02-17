@@ -218,10 +218,10 @@ slipstream_asset_name() {
 prompt_core_choice() {
   local current="${1:-nightowl}" input
   while true; do
-    echo ""
-    echo "Select slipstream core:"
-    echo "  1) nightowl (stable)"
-    echo "  2) plus (faster, experimental)"
+    printf '\n' >&2
+    printf 'Select slipstream core:\n' >&2
+    printf '  1) nightowl (stable)\n' >&2
+    printf '  2) plus (faster, experimental)\n' >&2
     if [[ "$current" == "plus" ]]; then
       read -r -p "Choice [2]: " input
       input="${input:-2}"
@@ -232,7 +232,7 @@ prompt_core_choice() {
     case "$input" in
     1 | nightowl) echo "nightowl"; return 0 ;;
     2 | plus) echo "plus"; return 0 ;;
-    *) warn "Invalid choice: $input" ;;
+    *) printf '[!] Invalid choice: %s\n' "$input" >&2 ;;
     esac
   done
 }
