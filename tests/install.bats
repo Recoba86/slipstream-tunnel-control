@@ -9,6 +9,12 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "stdin execution mode works with bash -s" {
+  run bash -lc "cat '$SCRIPT' | bash -s -- --help"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage: slipstream-tunnel"* ]]
+}
+
 @test "help output includes manual monitoring commands" {
   run bash "$SCRIPT" --help
   [ "$status" -eq 0 ]
