@@ -136,3 +136,8 @@ setup() {
   run bash -lc "source '$SCRIPT'; set_slipstream_source nightowl; download_release_asset_verified(){ return 1; }; ! download_slipstream_component client /tmp/ss-nope x86_64; [[ \"\$SLIPSTREAM_CORE\" == 'nightowl' ]]"
   [ "$status" -eq 0 ]
 }
+
+@test "instance resolver candidates include scanned and configured servers uniquely" {
+  run bash -lc "source '$SCRIPT'; tmp=\$(mktemp -d); TUNNEL_DIR=\"\$tmp\"; CONFIG_FILE=\"\$tmp/config\"; SERVERS_FILE=\"\$tmp/servers.txt\"; INSTANCES_DIR=\"\$tmp/instances\"; mkdir -p \"\$INSTANCES_DIR/a\" \"\$INSTANCES_DIR/b\"; printf '%s\n' 'CURRENT_SERVER=2.2.2.2' >\"\$CONFIG_FILE\"; printf '%s\n' '1.1.1.1' '2.2.2.2' 'bad.ip' >\"\$SERVERS_FILE\"; printf '%s\n' 'CURRENT_SERVER=3.3.3.3' >\"\$INSTANCES_DIR/a/config\"; printf '%s\n' 'CURRENT_SERVER=1.1.1.1' >\"\$INSTANCES_DIR/b/config\"; out=\$(collect_known_resolver_candidates | tr '\n' ' '); [[ \"\$out\" == '2.2.2.2 1.1.1.1 3.3.3.3 ' ]]"
+  [ "$status" -eq 0 ]
+}

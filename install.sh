@@ -512,6 +512,70 @@ instance_watchdog_last_restart_file() {
   echo "$WATCHDOG_STATE_DIR/watchdog-$name.last_restart"
 }
 
+collect_known_resolver_candidates() {
+  local candidate cfg
+
+  {
+    if [[ -f "$CONFIG_FILE" ]]; then
+      candidate=$(grep -E '^CURRENT_SERVER=' "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      is_valid_ipv4 "$candidate" && echo "$candidate"
+    fi
+
+    if [[ -s "$SERVERS_FILE" ]]; then
+      while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        is_valid_ipv4 "$candidate" && echo "$candidate"
+      done <"$SERVERS_FILE"
+    fi
+
+    if [[ -d "$INSTANCES_DIR" ]]; then
+      for cfg in "$INSTANCES_DIR"/*/config; do
+        [[ -f "$cfg" ]] || continue
+        candidate=$(grep -E '^CURRENT_SERVER=' "$cfg" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        is_valid_ipv4 "$candidate" && echo "$candidate"
+      done
+    fi
+  } | awk '!seen[$0]++'
+}
+
+prompt_instance_resolver_or_error() {
+  local out_var="$1" choice="" resolver=""
+  local candidates=()
+
+  while IFS= read -r resolver; do
+    [[ -n "$resolver" ]] || continue
+    candidates+=("$resolver")
+  done < <(collect_known_resolver_candidates)
+
+  if [[ ${#candidates[@]} -gt 0 ]]; then
+    echo "Known successful DNS resolver IPs:"
+    local i=1
+    for resolver in "${candidates[@]}"; do
+      printf "  %d) %s\n" "$i" "$resolver"
+      i=$((i + 1))
+    done
+    echo "  0) Enter manually"
+
+    prompt_read choice "Choose DNS index [1]: "
+    choice="${choice:-1}"
+    [[ "$choice" =~ ^[0-9]+$ ]] || error "Invalid selection: $choice"
+    if [[ "$choice" == "0" ]]; then
+      prompt_read resolver "DNS resolver IP (server IP): "
+      validate_ipv4_or_error "$resolver"
+      printf -v "$out_var" '%s' "$resolver"
+      return 0
+    fi
+    ((choice >= 1 && choice <= ${#candidates[@]})) || error "Selection out of range: $choice"
+    resolver="${candidates[$((choice - 1))]}"
+    printf -v "$out_var" '%s' "$resolver"
+    return 0
+  fi
+
+  prompt_read resolver "DNS resolver IP (server IP): "
+  validate_ipv4_or_error "$resolver"
+  printf -v "$out_var" '%s' "$resolver"
+}
+
 load_instance_config_or_error() {
   local name="$1"
   local cfg
@@ -2468,8 +2532,7 @@ cmd_instance_add() {
   if port_in_use "$port"; then
     error "Port $port is already in use on this host"
   fi
-  read -r -p "DNS resolver IP (server IP): " resolver
-  validate_ipv4_or_error "$resolver"
+  prompt_instance_resolver_or_error resolver
 
   mkdir -p "$instance_path"
   printf '%s\n' "$resolver" >"$servers_file"
