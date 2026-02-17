@@ -242,6 +242,41 @@ EOF
   [[ "$output" == *"amin|c2VjcmV0|17070|7000|2053"* ]]
 }
 
+@test "client auth disable rewires service to direct port and keeps saved creds" {
+  cat >"${HOME}/.tunnel/config" <<'EOF'
+DOMAIN=t.example.com
+MODE=client
+CURRENT_SERVER=8.8.8.8
+PORT=7000
+SSH_AUTH_ENABLED=true
+SSH_AUTH_USER=amin
+SSH_PASS_B64=c2VjcmV0
+SSH_REMOTE_APP_PORT=2053
+SSH_TRANSPORT_PORT=17070
+EOF
+
+  cat >"${BATS_TEST_TMPDIR}/run_client_auth_disable.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+check_dependencies() { :; }
+write_client_service() { echo "$1|$2|$3" >"$HOME/.tunnel/service.args"; }
+remove_ssh_client_service_if_present() { echo "removed" >"$HOME/.tunnel/removed.flag"; }
+cmd_client_auth_disable
+cat "$HOME/.tunnel/service.args"
+grep '^SSH_AUTH_ENABLED=false$' "$HOME/.tunnel/config"
+grep '^SSH_AUTH_USER=amin$' "$HOME/.tunnel/config"
+grep '^SSH_PASS_B64=c2VjcmV0$' "$HOME/.tunnel/config"
+test -f "$HOME/.tunnel/removed.flag"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_client_auth_disable.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_client_auth_disable.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"8.8.8.8|t.example.com|7000"* ]]
+  [[ "$output" == *"SSH_AUTH_ENABLED=false"* ]]
+}
+
 @test "auth list prints SSH tunnel users in server mode" {
   cat >"${BATS_TEST_TMPDIR}/run_auth_list.sh" <<'EOF'
 #!/usr/bin/env bash

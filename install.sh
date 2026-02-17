@@ -69,8 +69,11 @@ Commands:
   servers             Show verified DNS IPs with live latency checks
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
+  speed-profile       Set profile: fast (SSH off) / secure (SSH on)
   auth-setup          Enable/update SSH auth overlay for server mode
   auth-disable        Disable SSH auth overlay for server mode
+  auth-client-enable  Enable SSH auth overlay for client mode
+  auth-client-disable Disable SSH auth overlay for client mode
   auth-add            Create SSH tunnel user (username/password)
   auth-passwd         Change SSH tunnel user password
   auth-del            Delete SSH tunnel user
@@ -106,6 +109,7 @@ Examples:
   slipstream-tunnel rescan
   slipstream-tunnel servers
   slipstream-tunnel menu
+  slipstream-tunnel speed-profile fast
   slipstream-tunnel auth-add
   sst
 EOF
@@ -596,6 +600,11 @@ load_config_or_error() {
 ensure_mode_server_or_error() {
   load_config_or_error
   [[ "${MODE:-}" == "server" ]] || error "This command is available only in server mode"
+}
+
+ensure_mode_client_or_error() {
+  load_config_or_error
+  [[ "${MODE:-}" == "client" ]] || error "This command is available only in client mode"
 }
 
 is_true() {
@@ -1291,6 +1300,7 @@ EOF
   echo "  slipstream-tunnel start"
   echo "  slipstream-tunnel auth-add"
   echo "  slipstream-tunnel auth-disable"
+  echo "  slipstream-tunnel speed-profile [fast|secure|status]"
   echo "  slipstream-tunnel auth-list"
   echo "  slipstream-tunnel menu"
   echo "  sst"
@@ -1759,6 +1769,9 @@ EOF
   echo "  slipstream-tunnel rescan"
   echo "  slipstream-tunnel dashboard"
   echo "  slipstream-tunnel servers"
+  echo "  slipstream-tunnel auth-client-disable"
+  echo "  slipstream-tunnel auth-client-enable"
+  echo "  slipstream-tunnel speed-profile [fast|secure|status]"
   echo "  slipstream-tunnel menu"
   echo "  sst"
   echo "  journalctl -u slipstream-client -f"
@@ -2288,19 +2301,9 @@ cmd_edit() {
   esac
 }
 
-cmd_auth_setup() {
-  need_root
-  check_dependencies systemctl getent awk tr
-  ensure_mode_server_or_error
-
-  local app_port="${PORT:-2053}"
-  local ssh_backend_port="${SSH_BACKEND_PORT:-22}"
-  read -r -p "Protected app port [$app_port]: " input_port
-  [[ -n "$input_port" ]] && app_port="$input_port"
+server_enable_auth_overlay_with_ports() {
+  local app_port="$1" ssh_backend_port="$2"
   validate_port_or_error "$app_port"
-
-  read -r -p "SSH backend port for slipstream [$ssh_backend_port]: " input_port
-  [[ -n "$input_port" ]] && ssh_backend_port="$input_port"
   validate_port_or_error "$ssh_backend_port"
 
   apply_ssh_auth_overlay "$app_port"
@@ -2310,19 +2313,13 @@ cmd_auth_setup() {
   systemctl daemon-reload
   systemctl restart slipstream-server
   set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
+  SSH_AUTH_ENABLED="true"
+  PORT="$app_port"
+  SSH_BACKEND_PORT="$ssh_backend_port"
   log "SSH auth overlay enabled. Users authenticate via SSH before reaching 127.0.0.1:$app_port."
 }
 
-cmd_auth_disable() {
-  need_root
-  check_dependencies systemctl
-  ensure_mode_server_or_error
-
-  if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
-    warn "SSH auth overlay is already disabled."
-    return 0
-  fi
-
+server_disable_auth_overlay() {
   local app_port="${PORT:-2053}"
   local backup_file=""
   if [[ -f "$SSH_AUTH_CONFIG_FILE" ]]; then
@@ -2350,8 +2347,167 @@ cmd_auth_disable() {
   systemctl restart slipstream-server
   set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
   set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
-
+  SSH_AUTH_ENABLED="false"
+  SSH_BACKEND_PORT=""
   log "SSH auth overlay disabled. Slipstream now forwards directly to 127.0.0.1:$app_port."
+}
+
+cmd_auth_setup() {
+  need_root
+  check_dependencies systemctl getent awk tr
+  ensure_mode_server_or_error
+
+  local app_port="${PORT:-2053}"
+  local ssh_backend_port="${SSH_BACKEND_PORT:-22}"
+  read -r -p "Protected app port [$app_port]: " input_port
+  [[ -n "$input_port" ]] && app_port="$input_port"
+  read -r -p "SSH backend port for slipstream [$ssh_backend_port]: " input_port
+  [[ -n "$input_port" ]] && ssh_backend_port="$input_port"
+  server_enable_auth_overlay_with_ports "$app_port" "$ssh_backend_port"
+}
+
+cmd_auth_disable() {
+  need_root
+  check_dependencies systemctl
+  ensure_mode_server_or_error
+
+  if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
+    warn "SSH auth overlay is already disabled."
+    return 0
+  fi
+  server_disable_auth_overlay
+}
+
+cmd_client_auth_enable() {
+  need_root
+  check_dependencies systemctl ssh sshpass base64
+  ensure_mode_client_or_error
+
+  if client_ssh_auth_enabled; then
+    log "Client SSH auth overlay is already enabled."
+    return 0
+  fi
+
+  local ssh_user="${SSH_AUTH_USER:-}"
+  local ssh_pass_b64="${SSH_PASS_B64:-}"
+  local ssh_remote_port="${SSH_REMOTE_APP_PORT:-2053}"
+  local ssh_transport_port="${SSH_TRANSPORT_PORT:-17070}"
+  local client_port="${PORT:-7000}"
+  local current_server="${CURRENT_SERVER:-}"
+  [[ -n "$current_server" ]] || error "No DNS resolver set in config"
+  [[ -n "$ssh_user" ]] || error "No saved SSH username. Run 'slipstream-tunnel edit' first."
+  [[ -n "$ssh_pass_b64" ]] || error "No saved SSH password. Run 'slipstream-tunnel edit' first."
+
+  validate_unix_username_or_error "$ssh_user"
+  validate_port_or_error "$ssh_remote_port"
+  validate_port_or_error "$ssh_transport_port"
+  validate_port_or_error "$client_port"
+  [[ "$ssh_transport_port" != "$client_port" ]] || error "Internal SSH transport port must differ from client listen port"
+
+  local plain_pass
+  plain_pass=$(decode_base64_or_raw "$ssh_pass_b64")
+  [[ -n "$plain_pass" ]] || error "Saved SSH password is empty after decode"
+
+  write_client_service "$current_server" "$DOMAIN" "$ssh_transport_port"
+  systemctl daemon-reload
+  systemctl restart slipstream-client
+  systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
+
+  local preflight_rc=0
+  if test_client_ssh_auth_credentials "$ssh_user" "$plain_pass" "$ssh_transport_port" "$client_port" "$ssh_remote_port"; then
+    preflight_rc=0
+  else
+    preflight_rc=$?
+  fi
+  if [[ "$preflight_rc" -ne 0 ]]; then
+    if [[ "$preflight_rc" -eq 2 ]]; then
+      warn "Proceeding despite inconclusive SSH preflight. Verify with: slipstream-tunnel status && slipstream-tunnel logs -f"
+    else
+      error "SSH credential test failed. Aborting client auth enable."
+    fi
+  fi
+
+  write_ssh_client_env "$ssh_user" "$ssh_pass_b64" "$ssh_transport_port" "$client_port" "$ssh_remote_port"
+  write_ssh_client_service
+  set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
+  SSH_AUTH_ENABLED="true"
+
+  systemctl daemon-reload
+  systemctl enable "${SSH_CLIENT_SERVICE}"
+  systemctl restart "${SSH_CLIENT_SERVICE}"
+  log "Client SSH auth overlay enabled."
+}
+
+cmd_client_auth_disable() {
+  need_root
+  check_dependencies systemctl
+  ensure_mode_client_or_error
+
+  if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
+    warn "Client SSH auth overlay is already disabled."
+    return 0
+  fi
+
+  local current_server="${CURRENT_SERVER:-}"
+  local client_port="${PORT:-7000}"
+  [[ -n "$current_server" ]] || error "No DNS resolver set in config"
+  validate_port_or_error "$client_port"
+
+  write_client_service "$current_server" "$DOMAIN" "$client_port"
+  remove_ssh_client_service_if_present
+  set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
+  SSH_AUTH_ENABLED="false"
+
+  systemctl daemon-reload
+  systemctl restart slipstream-client
+  log "Client SSH auth overlay disabled. Tunnel now runs without SSH auth wrapper."
+}
+
+cmd_speed_profile() {
+  need_root
+  load_config_or_error
+
+  local profile="${1:-status}"
+  case "$profile" in
+  status)
+    if [[ "${MODE:-}" == "server" ]]; then
+      if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+        echo "Speed profile: secure (SSH overlay enabled)"
+      else
+        echo "Speed profile: fast (SSH overlay disabled)"
+      fi
+    elif [[ "${MODE:-}" == "client" ]]; then
+      if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+        echo "Speed profile: secure (SSH overlay enabled)"
+      else
+        echo "Speed profile: fast (SSH overlay disabled)"
+      fi
+    else
+      error "Unsupported mode in config: ${MODE:-unknown}"
+    fi
+    ;;
+  fast)
+    if [[ "${MODE:-}" == "server" ]]; then
+      cmd_auth_disable
+    elif [[ "${MODE:-}" == "client" ]]; then
+      cmd_client_auth_disable
+    else
+      error "Unsupported mode in config: ${MODE:-unknown}"
+    fi
+    ;;
+  secure)
+    if [[ "${MODE:-}" == "server" ]]; then
+      server_enable_auth_overlay_with_ports "${PORT:-2053}" "${SSH_BACKEND_PORT:-22}"
+    elif [[ "${MODE:-}" == "client" ]]; then
+      cmd_client_auth_enable
+    else
+      error "Unsupported mode in config: ${MODE:-unknown}"
+    fi
+    ;;
+  *)
+    error "Unknown speed profile: $profile (use: fast, secure, status)"
+    ;;
+  esac
 }
 
 cmd_auth_add() {
@@ -2453,7 +2609,9 @@ cmd_menu_client() {
     echo "8) Stop client tunnel service"
     echo "9) Restart client tunnel service"
     echo "10) Edit client settings (domain/port/resolver/auth)"
-    echo "11) Uninstall everything"
+    echo "11) Disable client SSH auth overlay (fast profile)"
+    echo "12) Enable client SSH auth overlay (secure profile)"
+    echo "13) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -2468,7 +2626,9 @@ cmd_menu_client() {
     8) cmd_stop ;;
     9) cmd_restart ;;
     10) cmd_edit_client ;;
-    11)
+    11) cmd_client_auth_disable ;;
+    12) cmd_client_auth_enable ;;
+    13)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -2498,7 +2658,9 @@ cmd_menu_server() {
     echo "10) List SSH tunnel users"
     echo "11) Enable/update SSH auth overlay"
     echo "12) Disable SSH auth overlay"
-    echo "13) Uninstall everything"
+    echo "13) Set speed profile: secure (SSH on)"
+    echo "14) Set speed profile: fast (SSH off)"
+    echo "15) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -2515,7 +2677,9 @@ cmd_menu_server() {
     10) cmd_auth_list ;;
     11) cmd_auth_setup ;;
     12) cmd_auth_disable ;;
-    13)
+    13) cmd_speed_profile secure ;;
+    14) cmd_speed_profile fast ;;
+    15)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -2837,8 +3001,14 @@ main() {
   dashboard) cmd_dashboard ;;
   servers) cmd_servers ;;
   menu | m) cmd_menu ;;
+  speed-profile)
+    shift
+    cmd_speed_profile "${1:-status}"
+    ;;
   auth-setup) cmd_auth_setup ;;
   auth-disable) cmd_auth_disable ;;
+  auth-client-enable) cmd_client_auth_enable ;;
+  auth-client-disable) cmd_client_auth_disable ;;
   auth-add)
     shift
     cmd_auth_add "${1:-}"
