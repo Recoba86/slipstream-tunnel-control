@@ -1639,8 +1639,13 @@ cmd_client() {
   systemctl restart slipstream-client
 
   if [[ "$ssh_auth_client" == "true" ]]; then
-    if ! test_client_ssh_auth_credentials "$ssh_user" "$ssh_pass" "$ssh_transport_port" "$port" "$ssh_remote_port"; then
-      local preflight_rc=$?
+    local preflight_rc=0
+    if test_client_ssh_auth_credentials "$ssh_user" "$ssh_pass" "$ssh_transport_port" "$port" "$ssh_remote_port"; then
+      preflight_rc=0
+    else
+      preflight_rc=$?
+    fi
+    if [[ "$preflight_rc" -ne 0 ]]; then
       if [[ "$preflight_rc" -eq 2 ]]; then
         warn "Proceeding despite inconclusive SSH preflight. Verify with: slipstream-tunnel status && slipstream-tunnel logs -f"
       else
@@ -2131,8 +2136,13 @@ cmd_edit_client() {
     systemctl daemon-reload
     systemctl restart slipstream-client
     systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
-    if ! test_client_ssh_auth_credentials "$new_ssh_user" "$new_ssh_pass_plain" "$new_ssh_transport_port" "$new_port" "$new_ssh_remote_port"; then
-      local preflight_rc=$?
+    local preflight_rc=0
+    if test_client_ssh_auth_credentials "$new_ssh_user" "$new_ssh_pass_plain" "$new_ssh_transport_port" "$new_port" "$new_ssh_remote_port"; then
+      preflight_rc=0
+    else
+      preflight_rc=$?
+    fi
+    if [[ "$preflight_rc" -ne 0 ]]; then
       if [[ "$preflight_rc" -eq 2 ]]; then
         warn "Proceeding despite inconclusive SSH preflight. Verify with: slipstream-tunnel status && slipstream-tunnel logs -f"
       else

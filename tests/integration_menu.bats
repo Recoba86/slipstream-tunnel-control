@@ -204,6 +204,44 @@ EOF
   [[ "$output" == *"1.1.1.1|new.example.com|7100"* ]]
 }
 
+@test "edit client keeps going when ssh preflight is inconclusive" {
+  cat >"${HOME}/.tunnel/config" <<'EOF'
+DOMAIN=t.example.com
+MODE=client
+CURRENT_SERVER=8.8.8.8
+PORT=7000
+SSH_AUTH_ENABLED=true
+SSH_AUTH_USER=amin
+SSH_PASS_B64=c2VjcmV0
+SSH_REMOTE_APP_PORT=2053
+SSH_TRANSPORT_PORT=17070
+EOF
+
+  cat >"${BATS_TEST_TMPDIR}/run_edit_client_inconclusive.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+check_dependencies() { :; }
+write_client_service() { echo "$1|$2|$3" >"$HOME/.tunnel/service.args"; }
+write_ssh_client_env() { echo "$1|$2|$3|$4|$5" >"$HOME/.tunnel/ssh_env.args"; }
+write_ssh_client_service() { echo "ok" >"$HOME/.tunnel/ssh_service.args"; }
+cmd_dashboard() { :; }
+test_client_ssh_auth_credentials() { return 2; }
+cmd_edit_client <<< $'\n\n\n\n\n\n\n\n'
+grep '^SSH_AUTH_ENABLED=true$' "$HOME/.tunnel/config"
+cat "$HOME/.tunnel/service.args"
+cat "$HOME/.tunnel/ssh_env.args"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_edit_client_inconclusive.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_edit_client_inconclusive.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Proceeding despite inconclusive SSH preflight"* ]]
+  [[ "$output" == *"SSH_AUTH_ENABLED=true"* ]]
+  [[ "$output" == *"8.8.8.8|t.example.com|17070"* ]]
+  [[ "$output" == *"amin|c2VjcmV0|17070|7000|2053"* ]]
+}
+
 @test "auth list prints SSH tunnel users in server mode" {
   cat >"${BATS_TEST_TMPDIR}/run_auth_list.sh" <<'EOF'
 #!/usr/bin/env bash
