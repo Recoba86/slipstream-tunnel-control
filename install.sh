@@ -944,6 +944,8 @@ remove_ssh_client_service_if_present() {
   if [[ -f "$SSH_CLIENT_ENV_FILE" ]]; then
     rm -f "$SSH_CLIENT_ENV_FILE"
   fi
+  # Clear stale failed state so `systemctl status` does not show an old dead unit.
+  systemctl reset-failed "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
 }
 
 restart_client_stack() {

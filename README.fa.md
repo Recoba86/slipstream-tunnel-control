@@ -82,7 +82,11 @@ slipstream-tunnel dashboard # داشبورد کوچک کلاینت
 slipstream-tunnel servers   # نمایش کامل DNSهای تاییدشده با ping و latency
 slipstream-tunnel menu      # منوی مانیتورینگ دستی
 sst                         # دستور کوتاه برای باز کردن منوی مانیتورینگ
+slipstream-tunnel speed-profile [fast|secure|status] # تغییر/نمایش پروفایل سرعت
 slipstream-tunnel auth-setup # فعال‌سازی/به‌روزرسانی لایه احراز هویت SSH (سرور)
+slipstream-tunnel auth-disable # غیرفعال‌سازی لایه احراز هویت SSH (سرور)
+slipstream-tunnel auth-client-enable # فعال‌سازی auth SSH در کلاینت
+slipstream-tunnel auth-client-disable # غیرفعال‌سازی auth SSH در کلاینت
 slipstream-tunnel auth-add   # ساخت کاربر SSH برای تونل
 slipstream-tunnel auth-passwd # تغییر رمز کاربر SSH تونل
 slipstream-tunnel auth-del   # حذف کاربر SSH تونل
@@ -91,7 +95,7 @@ slipstream-tunnel uninstall # حذف کامل
 slipstream-tunnel remove    # حذف همه چیز
 ```
 
-داخل `menu` می‌توانید تنظیمات (دامنه/پورت) را ویرایش کنید، سرویس را start/stop/restart کنید، uninstall انجام دهید و کاربران SSH تونل را مدیریت کنید (در mode سرور).
+داخل `menu` گزینه‌ها در ساب‌منوهای مرتب (مانیتورینگ، سرویس، auth/profile) گروه‌بندی شده‌اند.
 
 <div dir="rtl">
 
@@ -169,6 +173,28 @@ slipstream-tunnel remove    # حذف همه چیز
    - پورت: `7000` (یا مقدار `--port` کلاینت)
 
 4. **کانفیگ را export کنید** و در اپ V2Ray استفاده کنید
+
+## پروفایل سرعت
+
+- `slipstream-tunnel speed-profile secure`: لایه SSH روشن (امن‌تر، کمی کندتر)
+- `slipstream-tunnel speed-profile fast`: لایه SSH خاموش (سریع‌تر)
+- `slipstream-tunnel speed-profile status`: نمایش وضعیت پروفایل
+
+برای تغییر جداگانه:
+- سرور: `auth-setup` / `auth-disable`
+- کلاینت: `auth-client-enable` / `auth-client-disable`
+
+## بهینه‌سازی TCP (BBR)
+
+اسکریپت در مراحل نصب و `edit` تلاش می‌کند BBR + fq را فعال کند (در صورت پشتیبانی کرنل).
+
+بررسی وضعیت:
+
+```bash
+sysctl net.ipv4.tcp_available_congestion_control
+sysctl net.ipv4.tcp_congestion_control
+sysctl net.core.default_qdisc
+```
 
 ## عیب‌یابی
 

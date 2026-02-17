@@ -68,7 +68,11 @@ slipstream-tunnel dashboard # Small client dashboard
 slipstream-tunnel servers   # Full verified DNS list (live ping + DNS latency)
 slipstream-tunnel menu      # Interactive monitoring menu (client/server)
 sst                         # Short command for monitor menu
+slipstream-tunnel speed-profile [fast|secure|status] # Toggle/check profile
 slipstream-tunnel auth-setup # Enable/update SSH auth overlay (server mode)
+slipstream-tunnel auth-disable # Disable SSH auth overlay (server mode)
+slipstream-tunnel auth-client-enable # Enable SSH auth overlay (client mode)
+slipstream-tunnel auth-client-disable # Disable SSH auth overlay (client mode)
 slipstream-tunnel auth-add   # Create SSH tunnel user
 slipstream-tunnel auth-passwd # Change SSH tunnel user password
 slipstream-tunnel auth-del   # Delete SSH tunnel user
@@ -77,7 +81,7 @@ slipstream-tunnel uninstall # Remove everything
 slipstream-tunnel remove    # Remove everything
 ```
 
-Inside `menu`, you can manually edit settings (domain/port), start/stop/restart services, uninstall, and manage SSH auth users (server mode).
+Inside `menu`, actions are grouped into compact submenus (monitoring, service, auth/profile) for both server and client.
 
 ## Options
 
@@ -133,6 +137,25 @@ Inside `menu`, you can manually edit settings (domain/port), start/stop/restart 
 - Tunnel users are restricted to port-forwarding rules (no normal shell access expected).
 - During `client` setup, you can enable SSH auth client mode and provide username/password.
 - Manage server users later with: `auth-add`, `auth-passwd`, `auth-del`, `auth-list`.
+- You can toggle overlays later with:
+  - Server: `auth-setup` / `auth-disable`
+  - Client: `auth-client-enable` / `auth-client-disable`
+
+## Speed Profiles
+
+- `slipstream-tunnel speed-profile secure`: SSH overlay ON (more secure, more overhead)
+- `slipstream-tunnel speed-profile fast`: SSH overlay OFF (lower overhead, higher throughput)
+- `slipstream-tunnel speed-profile status`: show current profile
+
+In fast profile, use the Iran client public port directly (usually `7000`).
+
+## TCP Tuning (BBR)
+
+- Installer and edit flows attempt to enable `bbr` + `fq` automatically when kernel support exists.
+- Verify with:
+  - `sysctl net.ipv4.tcp_available_congestion_control`
+  - `sysctl net.ipv4.tcp_congestion_control`
+  - `sysctl net.core.default_qdisc`
 
 ## Files
 
