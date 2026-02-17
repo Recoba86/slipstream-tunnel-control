@@ -539,41 +539,79 @@ collect_known_resolver_candidates() {
 }
 
 prompt_instance_resolver_or_error() {
-  local out_var="$1" choice="" candidate_resolver=""
+  local out_var="$1" domain="$2" choice="" candidate_resolver="" latency=""
   local candidates=()
+
+  [[ -n "$domain" ]] || error "Internal error: domain is required for resolver selection"
 
   while IFS= read -r candidate_resolver; do
     [[ -n "$candidate_resolver" ]] || continue
     candidates+=("$candidate_resolver")
   done < <(collect_known_resolver_candidates)
 
+  echo "Resolver must be a reachable DNS IP from this client (not blocked foreign server IP)."
+
   if [[ ${#candidates[@]} -gt 0 ]]; then
     echo "Known successful DNS resolver IPs:"
     local i=1
     for candidate_resolver in "${candidates[@]}"; do
-      printf "  %d) %s\n" "$i" "$candidate_resolver"
+      if command -v dig &>/dev/null; then
+        latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
+        if [[ "$latency" -lt 1000 ]]; then
+          printf "  %d) %s (dns=%sms, reachable)\n" "$i" "$candidate_resolver" "$latency"
+        else
+          printf "  %d) %s (dns=fail)\n" "$i" "$candidate_resolver"
+        fi
+      else
+        printf "  %d) %s\n" "$i" "$candidate_resolver"
+      fi
       i=$((i + 1))
     done
     echo "  0) Enter manually"
 
-    prompt_read choice "Choose DNS index [1]: "
-    choice="${choice:-1}"
-    [[ "$choice" =~ ^[0-9]+$ ]] || error "Invalid selection: $choice"
-    if [[ "$choice" == "0" ]]; then
-      prompt_read candidate_resolver "DNS resolver IP (server IP): "
-      validate_ipv4_or_error "$candidate_resolver"
+    while true; do
+      prompt_read choice "Choose DNS index [1]: "
+      choice="${choice:-1}"
+      [[ "$choice" =~ ^[0-9]+$ ]] || {
+        warn "Invalid selection: $choice"
+        continue
+      }
+      if [[ "$choice" == "0" ]]; then
+        prompt_read candidate_resolver "DNS resolver IP (server IP): "
+        validate_ipv4_or_error "$candidate_resolver"
+      else
+        ((choice >= 1 && choice <= ${#candidates[@]})) || {
+          warn "Selection out of range: $choice"
+          continue
+        }
+        candidate_resolver="${candidates[$((choice - 1))]}"
+      fi
+
+      if command -v dig &>/dev/null; then
+        latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
+        if [[ "$latency" -ge 1000 ]]; then
+          warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Choose another resolver."
+          continue
+        fi
+      fi
       printf -v "$out_var" '%s' "$candidate_resolver"
       return 0
-    fi
-    ((choice >= 1 && choice <= ${#candidates[@]})) || error "Selection out of range: $choice"
-    candidate_resolver="${candidates[$((choice - 1))]}"
-    printf -v "$out_var" '%s' "$candidate_resolver"
-    return 0
+    done
   fi
 
-  prompt_read candidate_resolver "DNS resolver IP (server IP): "
-  validate_ipv4_or_error "$candidate_resolver"
-  printf -v "$out_var" '%s' "$candidate_resolver"
+  while true; do
+    prompt_read candidate_resolver "DNS resolver IP (server IP): "
+    validate_ipv4_or_error "$candidate_resolver"
+    if command -v dig &>/dev/null; then
+      latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
+      if [[ "$latency" -ge 1000 ]]; then
+        warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Try another resolver."
+        continue
+      fi
+    fi
+    printf -v "$out_var" '%s' "$candidate_resolver"
+    return 0
+  done
 }
 
 load_instance_config_or_error() {
@@ -2532,7 +2570,7 @@ cmd_instance_add() {
   if port_in_use "$port"; then
     error "Port $port is already in use on this host"
   fi
-  prompt_instance_resolver_or_error resolver
+  prompt_instance_resolver_or_error resolver "$domain"
 
   mkdir -p "$instance_path"
   printf '%s\n' "$resolver" >"$servers_file"
