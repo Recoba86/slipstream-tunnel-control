@@ -63,6 +63,8 @@ sst                         # Short command for client menu
 slipstream-tunnel remove    # Remove everything
 ```
 
+Inside `menu`, you can also manually select a DNS server from the verified list and switch instantly.
+
 ## Options
 
 | Option         | Description                               |

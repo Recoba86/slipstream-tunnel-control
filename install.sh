@@ -1118,6 +1118,59 @@ cmd_servers() {
   done <"$SERVERS_FILE"
 }
 
+cmd_select_server() {
+  need_root
+  check_dependencies systemctl
+  load_config_or_error
+  [[ "${MODE:-}" == "client" ]] || error "Manual selection is available only in client mode"
+  [[ -s "$SERVERS_FILE" ]] || error "No verified DNS server list found"
+
+  local servers=()
+  local server
+  while IFS= read -r server; do
+    [[ -z "$server" ]] && continue
+    is_valid_ipv4 "$server" || continue
+    servers+=("$server")
+  done <"$SERVERS_FILE"
+
+  [[ ${#servers[@]} -gt 0 ]] || error "No valid DNS IP entries found in $SERVERS_FILE"
+
+  echo "=== Manual DNS Selection ==="
+  local i=1 ping_ms dns_ms status
+  for server in "${servers[@]}"; do
+    ping_ms=$(ping_rtt_ms "$server")
+    dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
+    if [[ "$dns_ms" -lt 1000 ]]; then
+      status="OK"
+    else
+      status="SLOW/FAIL"
+    fi
+    printf "%2d) %-15s ping=%-10s dns=%-8s %s\n" "$i" "$server" "$ping_ms" "$dns_ms" "$status"
+    i=$((i + 1))
+  done
+
+  echo " 0) Cancel"
+  read -r -p "Choose DNS index: " choice
+  [[ -n "$choice" ]] || {
+    warn "No selection made"
+    return 0
+  }
+  [[ "$choice" =~ ^[0-9]+$ ]] || error "Invalid selection: $choice"
+  [[ "$choice" == "0" ]] && {
+    echo "Canceled"
+    return 0
+  }
+  ((choice >= 1 && choice <= ${#servers[@]})) || error "Selection out of range: $choice"
+
+  local selected="${servers[$((choice - 1))]}"
+  set_config_value "CURRENT_SERVER" "$selected" "$CONFIG_FILE"
+  write_client_service "$selected" "$DOMAIN" "${PORT:-7000}"
+  systemctl daemon-reload
+  systemctl restart slipstream-client
+  log "Manually switched to DNS server: $selected"
+  cmd_dashboard
+}
+
 cmd_menu() {
   need_root
   load_config_or_error
@@ -1133,6 +1186,7 @@ cmd_menu() {
     echo "3) Show status"
     echo "4) Follow client logs"
     echo "5) Show verified DNS IP list (live ping + DNS latency)"
+    echo "6) Select DNS manually from verified list"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -1142,6 +1196,7 @@ cmd_menu() {
     3) cmd_status ;;
     4) cmd_logs -f ;;
     5) cmd_servers ;;
+    6) cmd_select_server ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
