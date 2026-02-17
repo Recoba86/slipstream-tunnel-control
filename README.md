@@ -99,10 +99,11 @@ Inside `menu`, you can manually edit settings (domain/port), start/stop/restart 
 
 1. Guides Cloudflare DNS configuration (A + NS records)
 2. Verifies DNS with `dig`
-3. Generates self-signed certificate
-4. Downloads and installs slipstream-server binary
-5. Creates and starts systemd service
-6. Optional: enables SSH auth overlay and creates tunnel users
+3. Auto-detects port 53 conflicts and attempts automatic safe remediation
+4. Generates self-signed certificate
+5. Downloads and installs slipstream-server binary
+6. Creates and starts systemd service
+7. Optional: enables SSH auth overlay and creates tunnel users
 
 ### Client Setup
 

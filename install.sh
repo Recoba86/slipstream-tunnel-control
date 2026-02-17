@@ -257,6 +257,96 @@ port_53_in_use() {
   fi
 }
 
+port_53_owners() {
+  if command -v ss &>/dev/null; then
+    {
+      ss -H -ltnup 2>/dev/null
+      ss -H -lnuap 2>/dev/null
+    } | awk '$5 ~ /:53$/ {print}' | sort -u
+  elif command -v netstat &>/dev/null; then
+    netstat -lntup 2>/dev/null | awk '$4 ~ /:53$/ {print}'
+  else
+    return 1
+  fi
+}
+
+unit_exists() {
+  local unit="$1"
+  systemctl cat "$unit" >/dev/null 2>&1
+}
+
+stop_disable_unit_if_active() {
+  local unit="$1" short_name="${2:-$1}"
+  if ! unit_exists "$unit"; then
+    return 1
+  fi
+
+  local state
+  state=$(systemctl is-active "$unit" 2>/dev/null || true)
+  if [[ "$state" == "active" || "$state" == "activating" || "$state" == "reloading" ]]; then
+    log "Stopping $short_name to free port 53..."
+    systemctl stop "$unit" || true
+    systemctl disable "$unit" || true
+    return 0
+  fi
+  return 1
+}
+
+auto_fix_port_53_conflict() {
+  local attempted=false
+  local fixed_any=false
+  local owners
+
+  port_53_in_use || return 0
+  attempted=true
+  warn "Port 53 is busy. Attempting automatic conflict resolution..."
+  owners=$(port_53_owners || true)
+  if [[ -n "$owners" ]]; then
+    echo "Current listeners on :53:"
+    echo "$owners" | sed 's/^/  /'
+  fi
+
+  if stop_disable_unit_if_active "systemd-resolved.service" "systemd-resolved"; then
+    backup_resolver_if_needed
+    manage_resolver=true
+    fixed_any=true
+  fi
+
+  local dns_units=(
+    "dnsmasq.service"
+    "named.service"
+    "bind9.service"
+    "unbound.service"
+    "pdns-recursor.service"
+    "knot-resolver.service"
+  )
+  local unit
+  for unit in "${dns_units[@]}"; do
+    if stop_disable_unit_if_active "$unit" "${unit%.service}"; then
+      fixed_any=true
+    fi
+  done
+
+  if port_53_in_use; then
+    owners=$(port_53_owners || true)
+    warn "Port 53 is still busy after automatic attempts."
+    if [[ -n "$owners" ]]; then
+      echo "Still listening on :53:"
+      echo "$owners" | sed 's/^/  /'
+    fi
+    return 1
+  fi
+
+  if [[ "$attempted" == true ]]; then
+    if [[ "$fixed_any" == true ]]; then
+      log "Port 53 conflict resolved automatically."
+    else
+      log "Port 53 became available."
+    fi
+  fi
+  return 0
+}
+
 backup_resolver_if_needed() {
   mkdir -p "$TUNNEL_DIR"
   if [[ -f /etc/resolv.conf && ! -f "$RESOLV_BACKUP" ]]; then
@@ -606,7 +696,7 @@ EOF
 # ============================================
 cmd_server() {
   need_root
-  check_dependencies curl tar systemctl openssl awk sed grep head tr
+  check_dependencies curl tar systemctl openssl awk sed grep head tr sort
   local domain="" port="2053" slipstream_path="" manage_resolver=false
   local enable_ssh_auth=false ssh_backend_port="22"
 
@@ -743,14 +833,7 @@ cmd_server() {
   log "Continuing with setup..."
 
   if port_53_in_use; then
-    if [[ "$manage_resolver" == true && $(systemctl is-active systemd-resolved 2>/dev/null || true) == "active" ]]; then
-      backup_resolver_if_needed
-      log "Stopping systemd-resolved to free port 53..."
-      systemctl stop systemd-resolved
-      systemctl disable systemd-resolved
-    else
-      error "Port 53 is busy. Free it manually, or re-run with --manage-resolver to auto-manage resolver settings."
-    fi
+    auto_fix_port_53_conflict || error "Port 53 is still busy. Stop the remaining listener(s) shown above and run again."
   fi
 
   # Resolver changes are opt-in to avoid breaking host DNS unexpectedly.
@@ -1398,16 +1481,16 @@ cmd_health() {
       # Update config
       set_config_value "CURRENT_SERVER" "$best_server" "$CONFIG_FILE"
 
-	      # Restart client with new server
-	      local transport_port
-	      transport_port=$(client_transport_port_from_config)
-	      write_client_service "$best_server" "$DOMAIN" "$transport_port"
-	      systemctl daemon-reload
-	      if restart_client_stack; then
-	        echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
-	      else
-	        echo "[$timestamp] ERROR: service restart failed" >>"$HEALTH_LOG"
-	      fi
+      # Restart client with new server
+      local transport_port
+      transport_port=$(client_transport_port_from_config)
+      write_client_service "$best_server" "$DOMAIN" "$transport_port"
+      systemctl daemon-reload
+      if restart_client_stack; then
+        echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
+      else
+        echo "[$timestamp] ERROR: service restart failed" >>"$HEALTH_LOG"
+      fi
     else
       echo "No better server found"
       echo "[$timestamp] No better server found" >>"$HEALTH_LOG"

@@ -67,3 +67,9 @@ setup() {
   [[ "$output" == *"--ssh-user"* ]]
   [[ "$output" == *"--ssh-pass"* ]]
 }
+
+@test "auto port 53 fix enables resolver management when systemd-resolved is handled" {
+  run bash -lc "source '$SCRIPT'; manage_resolver=false; c=0; port_53_in_use(){ c=\$((c+1)); [[ \$c -eq 1 ]]; }; port_53_owners(){ echo 'udp UNCONN 0 0 127.0.0.53:53'; }; stop_disable_unit_if_active(){ [[ \"\$1\" == 'systemd-resolved.service' ]]; }; backup_resolver_if_needed(){ :; }; auto_fix_port_53_conflict >/dev/null; echo \"\$manage_resolver\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
