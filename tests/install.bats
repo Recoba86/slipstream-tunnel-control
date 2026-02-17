@@ -12,6 +12,7 @@ setup() {
 @test "help output includes manual monitoring commands" {
   run bash "$SCRIPT" --help
   [ "$status" -eq 0 ]
+  [[ "$output" == *"edit                Edit saved settings"* ]]
   [[ "$output" == *"start               Start tunnel service"* ]]
   [[ "$output" == *"stop                Stop tunnel service"* ]]
   [[ "$output" == *"restart             Restart tunnel service"* ]]

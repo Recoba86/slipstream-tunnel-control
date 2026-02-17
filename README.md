@@ -52,6 +52,7 @@ Uses a [fork of slipstream-rust](https://github.com/nightowlnerd/slipstream-rust
 ```bash
 slipstream-tunnel server    # Setup server
 slipstream-tunnel client    # Setup client
+slipstream-tunnel edit      # Edit saved settings (domain/port/...)
 slipstream-tunnel start     # Start tunnel service (current mode)
 slipstream-tunnel stop      # Stop tunnel service (current mode)
 slipstream-tunnel restart   # Restart tunnel service (current mode)
@@ -67,7 +68,7 @@ slipstream-tunnel uninstall # Remove everything
 slipstream-tunnel remove    # Remove everything
 ```
 
-Inside `menu`, you can manually start/stop/restart services. On server mode, the menu also includes stop and uninstall actions.
+Inside `menu`, you can manually edit settings (domain/port), start/stop/restart services, and uninstall.
 
 ## Options
 

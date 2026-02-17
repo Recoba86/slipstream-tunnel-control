@@ -179,3 +179,27 @@ EOF
   [[ "$output" == *"1.1.1.1|t.example.com|7000"* ]]
   [[ "$output" == *"dnscan --domain t.example.com"* ]]
 }
+
+@test "edit client settings updates domain and port without reinstall" {
+  cat >"${BATS_TEST_TMPDIR}/run_edit_client.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+write_client_service() { echo "$1|$2|$3" >"$HOME/.tunnel/service.args"; }
+cmd_dashboard() { :; }
+cmd_edit_client <<< $'new.example.com\n7100\n1.1.1.1\n'
+grep '^DOMAIN=new.example.com$' "$HOME/.tunnel/config"
+grep '^PORT=7100$' "$HOME/.tunnel/config"
+grep '^CURRENT_SERVER=1.1.1.1$' "$HOME/.tunnel/config"
+cat "$HOME/.tunnel/service.args"
+grep 'systemctl restart slipstream-client' "$MOCK_LOG"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_edit_client.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_edit_client.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DOMAIN=new.example.com"* ]]
+  [[ "$output" == *"PORT=7100"* ]]
+  [[ "$output" == *"CURRENT_SERVER=1.1.1.1"* ]]
+  [[ "$output" == *"1.1.1.1|new.example.com|7100"* ]]
+}

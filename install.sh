@@ -50,6 +50,7 @@ Usage: slipstream-tunnel <command> [options]
 Commands:
   server              Setup slipstream server
   client              Setup slipstream client
+  edit                Edit saved settings (domain/port/...)
   start               Start tunnel service (server/client mode)
   stop                Stop tunnel service (server/client mode)
   restart             Restart tunnel service (server/client mode)
@@ -78,6 +79,7 @@ Examples:
   slipstream-tunnel server --domain t.example.com --manage-resolver
   slipstream-tunnel client --domain t.example.com
   slipstream-tunnel client --dns-file /tmp/dns-servers.txt
+  slipstream-tunnel edit
   slipstream-tunnel stop
   slipstream-tunnel start
   slipstream-tunnel rescan
@@ -302,6 +304,65 @@ EOF
   log "Installed shortcut: sst"
 }
 
+ensure_server_cert() {
+  local domain="$1"
+  local force="${2:-false}"
+
+  ensure_service_user
+  mkdir -p "$CERT_DIR"
+  if [[ "$force" == true || ! -f "$CERT_DIR/key.pem" || ! -f "$CERT_DIR/cert.pem" ]]; then
+    log "Generating self-signed certificate..."
+    openssl genrsa -out "$CERT_DIR/key.pem" 2048
+    openssl req -x509 -new -nodes \
+      -key "$CERT_DIR/key.pem" \
+      -out "$CERT_DIR/cert.pem" \
+      -days 365 \
+      -subj "/CN=$domain"
+  fi
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$CERT_DIR"
+  chmod 700 "$CERT_DIR"
+  chmod 600 "$CERT_DIR/key.pem"
+  chmod 644 "$CERT_DIR/cert.pem"
+}
+
+write_server_service() {
+  local domain="$1" port="$2"
+  local bin_path="$SLIPSTREAM_SERVER_BIN"
+
+  cat >/etc/systemd/system/slipstream-server.service <<EOF
+[Unit]
+Description=Slipstream DNS Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+ExecStart=$bin_path \\
+  --dns-listen-port 53 \\
+  --target-address 127.0.0.1:$port \\
+  --domain $domain \\
+  --cert $CERT_DIR/cert.pem \\
+  --key $CERT_DIR/key.pem
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$CERT_DIR
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 # ============================================
 # SERVER MODE
 # ============================================
@@ -452,22 +513,7 @@ cmd_server() {
     fi
   fi
 
-  # Generate self-signed cert
-  ensure_service_user
-  mkdir -p "$CERT_DIR"
-  if [[ ! -f "$CERT_DIR/key.pem" ]]; then
-    log "Generating self-signed certificate..."
-    openssl genrsa -out "$CERT_DIR/key.pem" 2048
-    openssl req -x509 -new -nodes \
-      -key "$CERT_DIR/key.pem" \
-      -out "$CERT_DIR/cert.pem" \
-      -days 365 \
-      -subj "/CN=$domain"
-  fi
-  chown -R "$SERVICE_USER:$SERVICE_USER" "$CERT_DIR"
-  chmod 700 "$CERT_DIR"
-  chmod 600 "$CERT_DIR/key.pem"
-  chmod 644 "$CERT_DIR/cert.pem"
+  ensure_server_cert "$domain" false
 
   local arch bin_path="$SLIPSTREAM_SERVER_BIN"
   arch=$(detect_arch)
@@ -506,40 +552,8 @@ cmd_server() {
   fi
   chmod +x "$bin_path"
 
-  # Create systemd service
   log "Creating systemd service..."
-  cat >/etc/systemd/system/slipstream-server.service <<EOF
-[Unit]
-Description=Slipstream DNS Tunnel Server
-After=network.target
-
-[Service]
-Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
-ExecStart=$bin_path \\
-  --dns-listen-port 53 \\
-  --target-address 127.0.0.1:$port \\
-  --domain $domain \\
-  --cert $CERT_DIR/cert.pem \\
-  --key $CERT_DIR/key.pem
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectControlGroups=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$CERT_DIR
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  write_server_service "$domain" "$port"
 
   systemctl daemon-reload
   systemctl enable slipstream-server
@@ -567,6 +581,11 @@ EOF
   echo ""
   echo "Commands:"
   echo "  slipstream-tunnel status"
+  echo "  slipstream-tunnel edit"
+  echo "  slipstream-tunnel stop"
+  echo "  slipstream-tunnel start"
+  echo "  slipstream-tunnel menu"
+  echo "  sst"
   echo "  journalctl -u slipstream-server -f"
 }
 
@@ -920,6 +939,10 @@ EOF
   echo ""
   echo "Commands:"
   echo "  slipstream-tunnel status"
+  echo "  slipstream-tunnel edit"
+  echo "  slipstream-tunnel stop"
+  echo "  slipstream-tunnel start"
+  echo "  slipstream-tunnel restart"
   echo "  slipstream-tunnel health"
   echo "  slipstream-tunnel rescan"
   echo "  slipstream-tunnel dashboard"
@@ -1253,6 +1276,90 @@ cmd_uninstall() {
   cmd_remove
 }
 
+cmd_edit_client() {
+  need_root
+  check_dependencies systemctl
+  load_config_or_error
+  [[ "${MODE:-}" == "client" ]] || error "Client edit is available only in client mode"
+
+  local new_domain="${DOMAIN:-}"
+  local new_port="${PORT:-7000}"
+  local new_server="${CURRENT_SERVER:-}"
+  local input
+
+  echo "=== Edit Client Settings ==="
+  read -r -p "Domain [$new_domain]: " input
+  [[ -n "$input" ]] && new_domain="$input"
+  read -r -p "Tunnel listen port [$new_port]: " input
+  [[ -n "$input" ]] && new_port="$input"
+  read -r -p "DNS resolver IP [$new_server]: " input
+  [[ -n "$input" ]] && new_server="$input"
+
+  validate_domain_or_error "$new_domain"
+  validate_port_or_error "$new_port"
+  if [[ -n "$new_server" ]]; then
+    validate_ipv4_or_error "$new_server"
+  elif [[ -s "$SERVERS_FILE" ]]; then
+    read -r new_server _ <<<"$(find_best_server "$new_domain" "$SERVERS_FILE")"
+  fi
+  [[ -n "$new_server" ]] || error "No DNS resolver available. Run 'slipstream-tunnel rescan' first."
+
+  set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
+  set_config_value "PORT" "$new_port" "$CONFIG_FILE"
+  set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
+  write_client_service "$new_server" "$new_domain" "$new_port"
+  systemctl daemon-reload
+  systemctl restart slipstream-client
+
+  log "Client settings updated and service restarted"
+  cmd_dashboard
+}
+
+cmd_edit_server() {
+  need_root
+  check_dependencies systemctl openssl
+  load_config_or_error
+  [[ "${MODE:-}" == "server" ]] || error "Server edit is available only in server mode"
+
+  local new_domain="${DOMAIN:-}"
+  local new_port="${PORT:-2053}"
+  local input regenerate_cert=false
+
+  echo "=== Edit Server Settings ==="
+  read -r -p "Domain [$new_domain]: " input
+  [[ -n "$input" ]] && new_domain="$input"
+  read -r -p "Target port [$new_port]: " input
+  [[ -n "$input" ]] && new_port="$input"
+
+  validate_domain_or_error "$new_domain"
+  validate_port_or_error "$new_port"
+
+  if [[ "$new_domain" != "${DOMAIN:-}" ]]; then
+    read -r -p "Domain changed. Regenerate certificate? [Y/n]: " input
+    [[ "${input:-y}" != "n" ]] && regenerate_cert=true
+  fi
+
+  ensure_server_cert "$new_domain" "$regenerate_cert"
+  set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
+  set_config_value "PORT" "$new_port" "$CONFIG_FILE"
+  write_server_service "$new_domain" "$new_port"
+  systemctl daemon-reload
+  systemctl restart slipstream-server
+
+  log "Server settings updated and service restarted"
+  cmd_status
+}
+
+cmd_edit() {
+  need_root
+  load_config_or_error
+  case "${MODE:-}" in
+  client) cmd_edit_client ;;
+  server) cmd_edit_server ;;
+  *) error "Unsupported mode in config: ${MODE:-unknown}" ;;
+  esac
+}
+
 cmd_menu_client() {
   while true; do
     echo ""
@@ -1268,7 +1375,8 @@ cmd_menu_client() {
     echo "7) Start client tunnel service"
     echo "8) Stop client tunnel service"
     echo "9) Restart client tunnel service"
-    echo "10) Uninstall everything"
+    echo "10) Edit client settings (domain/port/resolver)"
+    echo "11) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -1282,7 +1390,8 @@ cmd_menu_client() {
     7) cmd_start ;;
     8) cmd_stop ;;
     9) cmd_restart ;;
-    10)
+    10) cmd_edit_client ;;
+    11)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -1305,7 +1414,8 @@ cmd_menu_server() {
     echo "3) Restart server tunnel service"
     echo "4) Show status"
     echo "5) Follow server logs"
-    echo "6) Uninstall everything"
+    echo "6) Edit server settings (domain/port)"
+    echo "7) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -1315,7 +1425,8 @@ cmd_menu_server() {
     3) cmd_restart ;;
     4) cmd_status ;;
     5) cmd_logs -f ;;
-    6)
+    6) cmd_edit_server ;;
+    7)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -1553,6 +1664,7 @@ main() {
     shift
     cmd_client "$@"
     ;;
+  edit) cmd_edit ;;
   start) cmd_start ;;
   stop) cmd_stop ;;
   restart) cmd_restart ;;

@@ -66,6 +66,7 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 ```bash
 slipstream-tunnel server    # راه‌اندازی سرور
 slipstream-tunnel client    # راه‌اندازی کلاینت
+slipstream-tunnel edit      # ویرایش تنظیمات ذخیره‌شده (دامنه/پورت/...)
 slipstream-tunnel start     # شروع سرویس تونل (بر اساس mode فعلی)
 slipstream-tunnel stop      # توقف سرویس تونل (بر اساس mode فعلی)
 slipstream-tunnel restart   # ری‌استارت سرویس تونل (بر اساس mode فعلی)
@@ -81,7 +82,7 @@ slipstream-tunnel uninstall # حذف کامل
 slipstream-tunnel remove    # حذف همه چیز
 ```
 
-داخل `menu` می‌توانید سرویس را start/stop/restart کنید. در حالت سرور هم گزینه stop و uninstall وجود دارد.
+داخل `menu` می‌توانید تنظیمات (دامنه/پورت) را ویرایش کنید، سرویس را start/stop/restart کنید و uninstall انجام دهید.
 
 <div dir="rtl">
 
