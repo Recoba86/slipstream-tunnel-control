@@ -735,6 +735,7 @@ test_client_ssh_auth_credentials() {
 
     if [[ "$probe_tail" == *"Connection refused"* || "$probe_tail" == *"Connection closed"* || "$probe_tail" == *"timed out"* ]]; then
       warn "SSH credential preflight could not be confirmed after ${max_attempts} attempts (last error: $probe_tail)"
+      warn "Hint: this often means the foreign server tunnel target is not SSH. On foreign server, re-run: slipstream-tunnel auth-setup (app port: ${remote_app_port}, SSH backend: 22)."
       return 2
     fi
 
@@ -745,6 +746,7 @@ test_client_ssh_auth_credentials() {
   done
 
   warn "SSH credential preflight could not be confirmed after ${max_attempts} attempts (transport/auth path timeout)"
+  warn "Hint: on foreign server verify 'slipstream-server' targets 127.0.0.1:22 when SSH auth overlay is enabled."
   return 2
 }
 
@@ -866,7 +868,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 EnvironmentFile=$SSH_CLIENT_ENV_FILE
-ExecStart=/bin/bash -lc 'raw="\$SSH_TUNNEL_PASS_B64"; cleaned="\$(printf "%%s" "\$raw" | tr -d " \t\r\n")"; pass="\$(printf "%%s" "\$cleaned" | base64 -d 2>/dev/null || true)"; [[ -n "\$pass" ]] || pass="\$raw"; bind="\${SSH_LOCAL_BIND_ADDR:-0.0.0.0}"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$SSH_CLIENT_ENV_DIR/known_hosts -L \${bind}:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
+ExecStart=/bin/bash -lc 'raw="\$SSH_TUNNEL_PASS_B64"; cleaned="\$(printf "%%s" "\$raw" | tr -d " \t\r\n")"; pass="\$(printf "%%s" "\$cleaned" | base64 -d 2>/dev/null || true)"; [[ -n "\$pass" ]] || pass="\$raw"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$SSH_CLIENT_ENV_DIR/known_hosts -L \${SSH_LOCAL_BIND_ADDR}:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
