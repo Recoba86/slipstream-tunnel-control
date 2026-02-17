@@ -1807,6 +1807,76 @@ find_best_server() {
   echo "$best_server $best_latency"
 }
 
+has_interactive_tty() {
+  [[ -t 0 || -r /dev/tty ]]
+}
+
+prompt_scan_settings_for_profile() {
+  local config_file="$1" fallback_dns_file="$2"
+  local scan_source="${SCAN_SOURCE:-generated}"
+  local scan_file="${SCAN_DNS_FILE:-}"
+  local scan_country="${SCAN_COUNTRY:-ir}"
+  local scan_mode="${SCAN_MODE:-fast}"
+  local scan_workers="${SCAN_WORKERS:-500}"
+  local scan_timeout="${SCAN_TIMEOUT:-2s}"
+  local scan_threshold="${SCAN_THRESHOLD:-50}"
+  local input
+
+  [[ "$scan_source" == "generated" || "$scan_source" == "file" ]] || scan_source="generated"
+  [[ -n "$scan_file" ]] || scan_file="$fallback_dns_file"
+
+  if has_interactive_tty; then
+    echo ""
+    echo "=== DNS Scan Settings ==="
+    echo "Press Enter to keep current values."
+    echo ""
+    while true; do
+      prompt_read input "Scan source [generated/file] [$scan_source]: "
+      [[ -z "$input" ]] && break
+      case "$input" in
+      generated | file)
+        scan_source="$input"
+        break
+        ;;
+      *)
+        warn "Invalid scan source: $input"
+        ;;
+      esac
+    done
+
+    if [[ "$scan_source" == "file" ]]; then
+      prompt_read input "DNS file path [$scan_file]: "
+      [[ -n "$input" ]] && scan_file="$input"
+      [[ -n "$scan_file" ]] || error "DNS file path is required when scan source is 'file'"
+    else
+      echo "Modes: list | fast | medium | all"
+      prompt_read input "Country code [$scan_country]: "
+      [[ -n "$input" ]] && scan_country="$input"
+      prompt_read input "Scan mode [$scan_mode]: "
+      [[ -n "$input" ]] && scan_mode="$input"
+    fi
+
+    prompt_read input "Workers [$scan_workers]: "
+    [[ -n "$input" ]] && scan_workers="$input"
+    prompt_read input "Timeout [$scan_timeout]: "
+    [[ -n "$input" ]] && scan_timeout="$input"
+    prompt_read input "Benchmark threshold % [$scan_threshold]: "
+    [[ -n "$input" ]] && scan_threshold="$input"
+  fi
+
+  if [[ "$scan_source" == "file" ]]; then
+    validate_dns_file_or_error "$scan_file"
+  fi
+
+  set_config_value "SCAN_SOURCE" "$scan_source" "$config_file"
+  set_config_value "SCAN_DNS_FILE" "$scan_file" "$config_file"
+  set_config_value "SCAN_COUNTRY" "$scan_country" "$config_file"
+  set_config_value "SCAN_MODE" "$scan_mode" "$config_file"
+  set_config_value "SCAN_WORKERS" "$scan_workers" "$config_file"
+  set_config_value "SCAN_TIMEOUT" "$scan_timeout" "$config_file"
+  set_config_value "SCAN_THRESHOLD" "$scan_threshold" "$config_file"
+}
+
 # ============================================
 # CLIENT MODE
 # ============================================
@@ -2385,6 +2455,9 @@ cmd_rescan() {
   [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
   [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || error "slipstream-client not installed"
 
+  prompt_scan_settings_for_profile "$CONFIG_FILE" "$SERVERS_FILE"
+  load_config_or_error
+
   local dnscan_args=(
     --domain "$DOMAIN"
     --data-dir "$DNSCAN_DIR/data"
@@ -2393,13 +2466,12 @@ cmd_rescan() {
   )
 
   local scan_source="${SCAN_SOURCE:-generated}"
+  local scan_file="${SCAN_DNS_FILE:-$SERVERS_FILE}"
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-50}"
 
   if [[ "$scan_source" == "file" ]]; then
-    local scan_file="${SCAN_DNS_FILE:-}"
-    [[ -n "$scan_file" ]] || error "SCAN_DNS_FILE missing in config"
     validate_dns_file_or_error "$scan_file"
     dnscan_args+=(--file "$scan_file")
   else
@@ -2826,6 +2898,9 @@ cmd_instance_rescan() {
   cfg=$(instance_config_file "$instance")
   servers_file=$(instance_servers_file "$instance")
 
+  prompt_scan_settings_for_profile "$cfg" "$servers_file"
+  load_instance_config_or_error "$instance"
+
   local dnscan_args=(
     --domain "$DOMAIN"
     --data-dir "$DNSCAN_DIR/data"
@@ -2834,12 +2909,12 @@ cmd_instance_rescan() {
   )
 
   local scan_source="${SCAN_SOURCE:-file}"
+  local scan_file="${SCAN_DNS_FILE:-$servers_file}"
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-50}"
 
   if [[ "$scan_source" == "file" ]]; then
-    local scan_file="${SCAN_DNS_FILE:-$servers_file}"
     validate_dns_file_or_error "$scan_file"
     dnscan_args+=(--file "$scan_file")
   else

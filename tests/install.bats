@@ -146,3 +146,8 @@ setup() {
   run bash -lc "source '$SCRIPT'; dig(){ [[ \"\$*\" == *'@1.1.1.1'* ]] && return 0 || return 1; }; resolver_answers_dns_queries '1.1.1.1'; ! resolver_answers_dns_queries '2.2.2.2'"
   [ "$status" -eq 0 ]
 }
+
+@test "rescan settings helper persists current defaults in non-interactive mode" {
+  run bash -lc "source '$SCRIPT'; has_interactive_tty(){ return 1; }; cfg=\$(mktemp); SCAN_SOURCE=generated; SCAN_DNS_FILE=/tmp/custom-dns.txt; SCAN_COUNTRY=ir; SCAN_MODE=fast; SCAN_WORKERS=500; SCAN_TIMEOUT=2s; SCAN_THRESHOLD=50; prompt_scan_settings_for_profile \"\$cfg\" /tmp/fallback.txt; grep -q '^SCAN_SOURCE=generated$' \"\$cfg\" && grep -q '^SCAN_COUNTRY=ir$' \"\$cfg\" && grep -q '^SCAN_MODE=fast$' \"\$cfg\" && grep -q '^SCAN_WORKERS=500$' \"\$cfg\" && grep -q '^SCAN_TIMEOUT=2s$' \"\$cfg\" && grep -q '^SCAN_THRESHOLD=50$' \"\$cfg\""
+  [ "$status" -eq 0 ]
+}
