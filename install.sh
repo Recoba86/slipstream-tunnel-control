@@ -412,6 +412,18 @@ require_flag_value() {
   [[ -n "$value" ]] || error "Missing value for $flag"
 }
 
+prompt_read() {
+  local out_var="$1" prompt="$2" input=""
+  if [[ -t 0 ]]; then
+    read -r -p "$prompt" input
+  elif [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" input </dev/tty
+  else
+    error "Interactive input required but no TTY is available. Run: curl ... -o /tmp/slipstream-install.sh && bash /tmp/slipstream-install.sh ..."
+  fi
+  printf -v "$out_var" '%s' "$input"
+}
+
 is_valid_ipv4() {
   local ip="$1"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -1372,7 +1384,7 @@ cmd_server() {
 
   if [[ -z "$server_ip" ]]; then
     warn "Could not auto-detect IP (services blocked or unreachable)"
-    read -p "Enter server IP: " server_ip
+    prompt_read server_ip "Enter server IP: "
     validate_ipv4_or_error "$server_ip"
   fi
 
@@ -1396,12 +1408,12 @@ cmd_server() {
 
   # Get domain if not provided
   if [[ -z "$domain" ]]; then
-    read -p "Enter tunnel domain (e.g., t.example.com): " domain
+    prompt_read domain "Enter tunnel domain (e.g., t.example.com): "
     validate_domain_or_error "$domain"
   fi
 
   # Confirm DNS setup
-  read -p "DNS configured? (y/n): " confirm
+  prompt_read confirm "DNS configured? (y/n): "
   [[ "$confirm" != "y" ]] && error "Please configure DNS first, then run again."
 
   # Try to verify (informational only)
