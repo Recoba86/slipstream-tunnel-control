@@ -13,7 +13,7 @@
 </div>
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
+sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
 ```
 
 <div dir="rtl">
@@ -25,7 +25,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel
 </div>
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
+sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
 ```
 
 <div dir="rtl">
@@ -69,6 +69,9 @@ slipstream-tunnel client    # راه‌اندازی کلاینت
 slipstream-tunnel status    # نمایش وضعیت
 slipstream-tunnel logs      # مشاهده لاگ (با -f برای دنبال کردن)
 slipstream-tunnel health    # بررسی DNS و تعویض اگر کند باشد
+slipstream-tunnel rescan    # اسکن دستی DNS و تعویض به بهترین
+slipstream-tunnel dashboard # داشبورد کوچک کلاینت
+slipstream-tunnel menu      # منوی مانیتورینگ دستی
 slipstream-tunnel remove    # حذف همه چیز
 ```
 
@@ -83,6 +86,7 @@ slipstream-tunnel remove    # حذف همه چیز
 | `--dns-file` | لیست سرورهای DNS (بدون اسکن subnet) |
 | `--dnscan` | مسیر فایل dnscan (حالت آفلاین) |
 | `--slipstream` | مسیر باینری slipstream (حالت آفلاین) |
+| `--manage-resolver` | اجازه تغییر resolver روی سرور |
 
 ## نحوه کار
 

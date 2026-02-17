@@ -9,7 +9,7 @@ Slipstream DNS tunnel setup with automatic DNS server scanning via dnscan.
 ### Server (outside Iran)
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
+sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) server
 ```
 
 Follow the prompts to configure Cloudflare DNS.
@@ -17,7 +17,7 @@ Follow the prompts to configure Cloudflare DNS.
 ### Client (inside Iran)
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
+sudo bash <(curl -Ls https://raw.githubusercontent.com/nightowlnerd/slipstream-tunnel/main/install.sh) client
 ```
 
 After install, `slipstream-tunnel` command is available globally.
@@ -55,6 +55,9 @@ slipstream-tunnel client    # Setup client
 slipstream-tunnel status    # Show current status
 slipstream-tunnel logs      # View logs (add -f to follow)
 slipstream-tunnel health    # Check DNS and switch if slow
+slipstream-tunnel rescan    # Manual DNS rescan + switch best server
+slipstream-tunnel dashboard # Small client dashboard
+slipstream-tunnel menu      # Interactive monitoring menu
 slipstream-tunnel remove    # Remove everything
 ```
 
@@ -67,6 +70,7 @@ slipstream-tunnel remove    # Remove everything
 | `--dns-file`   | Custom DNS server list (skips subnet scan)|
 | `--dnscan`     | Path to dnscan tarball (offline mode)     |
 | `--slipstream` | Path to slipstream binary (offline mode)  |
+| `--manage-resolver` | Allow server setup to edit resolver config |
 
 ## How It Works
 
@@ -92,6 +96,8 @@ slipstream-tunnel remove    # Remove everything
 - Tests current DNS server latency
 - If latency > 1000ms, switches to better server
 - Logs to `~/.tunnel/health.log`
+- You can trigger checks manually with `slipstream-tunnel health` or full rescan with `slipstream-tunnel rescan`
+- Use `slipstream-tunnel dashboard` or `slipstream-tunnel menu` for manual monitoring
 
 ## Files
 
