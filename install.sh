@@ -759,7 +759,7 @@ write_ssh_auth_config() {
 Match Group $SSH_AUTH_GROUP
     PasswordAuthentication yes
     KbdInteractiveAuthentication no
-    AuthenticationMethods password
+    PubkeyAuthentication no
     AllowTcpForwarding yes
     AllowAgentForwarding no
     AllowStreamLocalForwarding no
