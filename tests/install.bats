@@ -27,6 +27,7 @@ setup() {
   [[ "$output" == *"servers"* ]]
   [[ "$output" == *"menu"* ]]
   [[ "$output" == *"speed-profile"* ]]
+  [[ "$output" == *"core-switch"* ]]
   [[ "$output" == *"auth-setup"* ]]
   [[ "$output" == *"auth-disable"* ]]
   [[ "$output" == *"auth-client-enable"* ]]
@@ -65,6 +66,7 @@ setup() {
 @test "help output includes ssh auth client/server flags" {
   run bash "$SCRIPT" --help
   [ "$status" -eq 0 ]
+  [[ "$output" == *"--core <name>"* ]]
   [[ "$output" == *"--ssh-auth"* ]]
   [[ "$output" == *"--ssh-backend-port"* ]]
   [[ "$output" == *"--ssh-auth-client"* ]]

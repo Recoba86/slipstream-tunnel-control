@@ -71,6 +71,7 @@ slipstream-tunnel servers   # Full verified DNS list (live ping + DNS latency)
 slipstream-tunnel menu      # Interactive monitoring menu (client/server)
 sst                         # Short command for monitor menu
 slipstream-tunnel speed-profile [fast|secure|status] # Toggle/check profile
+slipstream-tunnel core-switch [nightowl|plus] # Switch core in-place after install
 slipstream-tunnel auth-setup # Enable/update SSH auth overlay (server mode)
 slipstream-tunnel auth-disable # Disable SSH auth overlay (server mode)
 slipstream-tunnel auth-client-enable # Enable SSH auth overlay (client mode)

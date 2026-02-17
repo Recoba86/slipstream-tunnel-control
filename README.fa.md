@@ -85,6 +85,7 @@ slipstream-tunnel servers   # نمایش کامل DNSهای تاییدشده ب�
 slipstream-tunnel menu      # منوی مانیتورینگ دستی
 sst                         # دستور کوتاه برای باز کردن منوی مانیتورینگ
 slipstream-tunnel speed-profile [fast|secure|status] # تغییر/نمایش پروفایل سرعت
+slipstream-tunnel core-switch [nightowl|plus] # تعویض هسته بعد از نصب (بدون uninstall)
 slipstream-tunnel auth-setup # فعال‌سازی/به‌روزرسانی لایه احراز هویت SSH (سرور)
 slipstream-tunnel auth-disable # غیرفعال‌سازی لایه احراز هویت SSH (سرور)
 slipstream-tunnel auth-client-enable # فعال‌سازی auth SSH در کلاینت

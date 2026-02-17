@@ -75,6 +75,7 @@ Commands:
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
   speed-profile       Set profile: fast (SSH off) / secure (SSH on)
+  core-switch        Switch current mode to another core (nightowl/plus)
   auth-setup          Enable/update SSH auth overlay for server mode
   auth-disable        Disable SSH auth overlay for server mode
   auth-client-enable  Enable SSH auth overlay for client mode
@@ -116,6 +117,7 @@ Examples:
   slipstream-tunnel servers
   slipstream-tunnel menu
   slipstream-tunnel speed-profile fast
+  slipstream-tunnel core-switch plus
   slipstream-tunnel auth-add
   sst
 EOF
@@ -205,6 +207,28 @@ slipstream_asset_name() {
     error "Unknown SLIPSTREAM_ASSET_LAYOUT: $SLIPSTREAM_ASSET_LAYOUT"
     ;;
   esac
+}
+
+prompt_core_choice() {
+  local current="${1:-nightowl}" input
+  while true; do
+    echo ""
+    echo "Select slipstream core:"
+    echo "  1) nightowl (stable)"
+    echo "  2) plus (faster, experimental)"
+    if [[ "$current" == "plus" ]]; then
+      read -r -p "Choice [2]: " input
+      input="${input:-2}"
+    else
+      read -r -p "Choice [1]: " input
+      input="${input:-1}"
+    fi
+    case "$input" in
+    1 | nightowl) echo "nightowl"; return 0 ;;
+    2 | plus) echo "plus"; return 0 ;;
+    *) warn "Invalid choice: $input" ;;
+    esac
+  done
 }
 
 check_dependencies() {
@@ -1159,6 +1183,7 @@ cmd_server() {
   need_root
   check_dependencies curl tar systemctl openssl awk sed grep head tr sort
   local slipstream_core="$SLIPSTREAM_CORE"
+  local core_from_flag=false
   local domain="" port="2053" slipstream_path="" manage_resolver=false
   local enable_ssh_auth=false ssh_backend_port="22"
 
@@ -1177,6 +1202,7 @@ cmd_server() {
     --core)
       require_flag_value "$1" "${2:-}"
       slipstream_core="$2"
+      core_from_flag=true
       shift 2
       ;;
     --slipstream)
@@ -1207,6 +1233,9 @@ cmd_server() {
     esac
   done
 
+  if [[ "$core_from_flag" == false && -t 0 ]]; then
+    slipstream_core=$(prompt_core_choice "$slipstream_core")
+  fi
   set_slipstream_source "$slipstream_core"
   validate_port_or_error "$port"
   validate_port_or_error "$ssh_backend_port"
@@ -1443,6 +1472,7 @@ EOF
   echo "  slipstream-tunnel auth-add"
   echo "  slipstream-tunnel auth-disable"
   echo "  slipstream-tunnel speed-profile [fast|secure|status]"
+  echo "  slipstream-tunnel core-switch [nightowl|plus]"
   echo "  slipstream-tunnel auth-list"
   echo "  slipstream-tunnel menu"
   echo "  sst"
@@ -1520,6 +1550,7 @@ cmd_client() {
   need_root
   check_dependencies curl tar systemctl awk sed grep head wc dig
   local slipstream_core="$SLIPSTREAM_CORE"
+  local core_from_flag=false
   local domain="" dnscan_path="" slipstream_path="" port="7000" dns_file=""
   local port_from_flag=false
   local ssh_auth_client=false ssh_user="" ssh_pass="" ssh_remote_port="2053" ssh_transport_port="17070"
@@ -1539,6 +1570,7 @@ cmd_client() {
     --core)
       require_flag_value "$1" "${2:-}"
       slipstream_core="$2"
+      core_from_flag=true
       shift 2
       ;;
     --slipstream)
@@ -1582,6 +1614,9 @@ cmd_client() {
     esac
   done
 
+  if [[ "$core_from_flag" == false && -t 0 ]]; then
+    slipstream_core=$(prompt_core_choice "$slipstream_core")
+  fi
   set_slipstream_source "$slipstream_core"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
   [[ -n "$dns_file" ]] && validate_dns_file_or_error "$dns_file"
@@ -1919,6 +1954,7 @@ EOF
   echo "  slipstream-tunnel auth-client-disable"
   echo "  slipstream-tunnel auth-client-enable"
   echo "  slipstream-tunnel speed-profile [fast|secure|status]"
+  echo "  slipstream-tunnel core-switch [nightowl|plus]"
   echo "  slipstream-tunnel menu"
   echo "  sst"
   echo "  journalctl -u slipstream-client -f"
@@ -2659,6 +2695,56 @@ cmd_speed_profile() {
   esac
 }
 
+cmd_core_switch() {
+  need_root
+  check_dependencies curl tar systemctl
+  load_config_or_error
+
+  local current_core="${SLIPSTREAM_CORE:-nightowl}"
+  local target_core="${1:-}"
+  if [[ -z "$target_core" && -t 0 ]]; then
+    target_core=$(prompt_core_choice "$current_core")
+  fi
+  [[ -n "$target_core" ]] || error "Usage: slipstream-tunnel core-switch <nightowl|plus>"
+
+  if [[ "${current_core}" == "${target_core}" ]]; then
+    log "Core is already '${target_core}'."
+    return 0
+  fi
+  set_slipstream_source "$target_core"
+
+  local arch
+  arch=$(detect_arch)
+  log "Switching core: ${current_core} -> ${target_core}"
+  log "Source: ${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION} (${SLIPSTREAM_ASSET_LAYOUT})"
+
+  if [[ "${MODE:-}" == "server" ]]; then
+    systemctl stop slipstream-server 2>/dev/null || true
+    download_slipstream_component "server" "$SLIPSTREAM_SERVER_BIN" "$arch" \
+      || error "Failed to download server binary for core '${target_core}'"
+    chmod +x "$SLIPSTREAM_SERVER_BIN"
+    systemctl daemon-reload
+    systemctl restart slipstream-server
+  elif [[ "${MODE:-}" == "client" ]]; then
+    download_slipstream_component "client" "$SLIPSTREAM_CLIENT_BIN" "$arch" \
+      || error "Failed to download client binary for core '${target_core}'"
+    chmod +x "$SLIPSTREAM_CLIENT_BIN"
+    # Keep verifier binary in sync.
+    cp "$SLIPSTREAM_CLIENT_BIN" "$TUNNEL_DIR/slipstream-client" 2>/dev/null || true
+    chmod +x "$TUNNEL_DIR/slipstream-client" 2>/dev/null || true
+    restart_client_stack
+  else
+    error "Unsupported mode in config: ${MODE:-unknown}"
+  fi
+
+  set_config_value "SLIPSTREAM_CORE" "$SLIPSTREAM_CORE" "$CONFIG_FILE"
+  set_config_value "SLIPSTREAM_REPO" "$SLIPSTREAM_REPO" "$CONFIG_FILE"
+  set_config_value "SLIPSTREAM_VERSION" "$SLIPSTREAM_VERSION" "$CONFIG_FILE"
+  set_config_value "SLIPSTREAM_ASSET_LAYOUT" "$SLIPSTREAM_ASSET_LAYOUT" "$CONFIG_FILE"
+  log "Core switch completed."
+  cmd_status
+}
+
 cmd_auth_add() {
   need_root
   check_dependencies getent awk tr chpasswd usermod
@@ -2828,7 +2914,8 @@ cmd_menu_client_auth() {
     echo "3) Set speed profile secure"
     echo "4) Set speed profile fast"
     echo "5) Show speed profile status"
-    echo "6) Edit client settings (domain/port/resolver/auth)"
+    echo "6) Switch core (nightowl/plus)"
+    echo "7) Edit client settings (domain/port/resolver/auth)"
     echo "0) Back"
     read -r -p "Select: " choice
 
@@ -2838,7 +2925,8 @@ cmd_menu_client_auth() {
     3) cmd_speed_profile secure ;;
     4) cmd_speed_profile fast ;;
     5) cmd_speed_profile status ;;
-    6) cmd_edit_client ;;
+    6) cmd_core_switch ;;
+    7) cmd_edit_client ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
@@ -2911,6 +2999,7 @@ cmd_menu_server_auth() {
     echo "7) Set speed profile secure"
     echo "8) Set speed profile fast"
     echo "9) Show speed profile status"
+    echo "10) Switch core (nightowl/plus)"
     echo "0) Back"
     read -r -p "Select: " choice
 
@@ -2924,6 +3013,7 @@ cmd_menu_server_auth() {
     7) cmd_speed_profile secure ;;
     8) cmd_speed_profile fast ;;
     9) cmd_speed_profile status ;;
+    10) cmd_core_switch ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
@@ -3248,6 +3338,10 @@ main() {
   speed-profile)
     shift
     cmd_speed_profile "${1:-status}"
+    ;;
+  core-switch)
+    shift
+    cmd_core_switch "${1:-}"
     ;;
   auth-setup) cmd_auth_setup ;;
   auth-disable) cmd_auth_disable ;;
