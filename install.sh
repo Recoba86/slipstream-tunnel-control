@@ -11,6 +11,10 @@ DNSCAN_REPO="nightowlnerd/dnscan"
 DNSCAN_VERSION="${DNSCAN_VERSION:-v1.4.0}"
 SCRIPT_REPO="${SCRIPT_REPO:-Recoba86/slipstream-tunnel-control}"
 SCRIPT_BRANCH="${SCRIPT_BRANCH:-main}"
+SLIPSTREAM_SERVER_BIN="${SLIPSTREAM_SERVER_BIN:-/usr/local/bin/slipstream-server}"
+SLIPSTREAM_CLIENT_BIN="${SLIPSTREAM_CLIENT_BIN:-/usr/local/bin/slipstream-client}"
+TUNNEL_CMD_BIN="${TUNNEL_CMD_BIN:-/usr/local/bin/slipstream-tunnel}"
+SST_BIN="${SST_BIN:-/usr/local/bin/sst}"
 # =============================================================================
 
 TUNNEL_DIR="$HOME/.tunnel"
@@ -240,9 +244,18 @@ restore_resolver_if_backed_up() {
 set_config_value() {
   local key="$1" value="$2" file="$3"
   if grep -q "^${key}=" "$file" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    sed_in_place "s|^${key}=.*|${key}=${value}|" "$file"
   else
     echo "${key}=${value}" >>"$file"
+  fi
+}
+
+sed_in_place() {
+  local expr="$1" file="$2"
+  if sed --version >/dev/null 2>&1; then
+    sed -i "$expr" "$file"
+  else
+    sed -i '' "$expr" "$file"
   fi
 }
 
@@ -253,8 +266,8 @@ load_config_or_error() {
 }
 
 install_self() {
-  local install_path="/usr/local/bin/slipstream-tunnel"
-  local shortcut_path="/usr/local/bin/sst"
+  local install_path="$TUNNEL_CMD_BIN"
+  local shortcut_path="$SST_BIN"
   local current_script=""
 
   if [[ -f "$0" ]]; then
@@ -275,9 +288,9 @@ install_self() {
   chmod +x "$install_path"
   log "Installed: slipstream-tunnel"
 
-  cat >"$shortcut_path" <<'EOF'
+  cat >"$shortcut_path" <<EOF
 #!/usr/bin/env bash
-exec /usr/local/bin/slipstream-tunnel menu "$@"
+exec "$install_path" menu "\$@"
 EOF
   chmod +x "$shortcut_path"
   log "Installed shortcut: sst"
@@ -450,7 +463,7 @@ cmd_server() {
   chmod 600 "$CERT_DIR/key.pem"
   chmod 644 "$CERT_DIR/cert.pem"
 
-  local arch bin_path="/usr/local/bin/slipstream-server"
+  local arch bin_path="$SLIPSTREAM_SERVER_BIN"
   arch=$(detect_arch)
 
   # Stop existing service
@@ -553,7 +566,7 @@ EOF
 
 write_client_service() {
   local resolver="$1" domain="$2" port="$3"
-  local bin_path="/usr/local/bin/slipstream-client"
+  local bin_path="$SLIPSTREAM_CLIENT_BIN"
 
   cat >/etc/systemd/system/slipstream-client.service <<EOF
 [Unit]
@@ -708,7 +721,7 @@ cmd_client() {
 
   # Get slipstream binary (required for --verify)
   local slipstream_bin="$TUNNEL_DIR/slipstream-client"
-  local installed_bin="/usr/local/bin/slipstream-client"
+  local installed_bin="$SLIPSTREAM_CLIENT_BIN"
   local slipstream_asset="slipstream-linux-${arch}.tar.gz"
 
   if [[ -x "$slipstream_bin" ]]; then
@@ -851,7 +864,7 @@ cmd_client() {
   [[ -n "$best_server" ]] || error "Could not choose a working DNS server from scan results"
   log "Using DNS server: $best_server (${best_latency}ms)"
 
-  local bin_path="/usr/local/bin/slipstream-client"
+  local bin_path="$SLIPSTREAM_CLIENT_BIN"
 
   # Stop existing service
   systemctl stop slipstream-client 2>/dev/null || true
@@ -991,13 +1004,13 @@ cmd_rescan() {
   load_config_or_error
   [[ "${MODE:-}" == "client" ]] || error "Manual rescan applies only to client mode"
   [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
-  [[ -x /usr/local/bin/slipstream-client ]] || error "slipstream-client not installed"
+  [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || error "slipstream-client not installed"
 
   local dnscan_args=(
     --domain "$DOMAIN"
     --data-dir "$DNSCAN_DIR/data"
     --output "$SERVERS_FILE"
-    --verify "/usr/local/bin/slipstream-client"
+    --verify "$SLIPSTREAM_CLIENT_BIN"
   )
 
   local scan_source="${SCAN_SOURCE:-generated}"
@@ -1222,7 +1235,7 @@ test_dns_latency() {
 }
 
 setup_health_timer() {
-  local script_path="/usr/local/bin/slipstream-tunnel"
+  local script_path="$TUNNEL_CMD_BIN"
 
   # Create systemd service
   cat >/etc/systemd/system/tunnel-health.service <<EOF
@@ -1345,24 +1358,24 @@ cmd_remove() {
   fi
 
   # Remove binaries
-  if [[ -f /usr/local/bin/slipstream-server ]]; then
+  if [[ -f "$SLIPSTREAM_SERVER_BIN" ]]; then
     log "Removing slipstream-server binary..."
-    rm -f /usr/local/bin/slipstream-server
+    rm -f "$SLIPSTREAM_SERVER_BIN"
   fi
 
-  if [[ -f /usr/local/bin/slipstream-client ]]; then
+  if [[ -f "$SLIPSTREAM_CLIENT_BIN" ]]; then
     log "Removing slipstream-client binary..."
-    rm -f /usr/local/bin/slipstream-client
+    rm -f "$SLIPSTREAM_CLIENT_BIN"
   fi
 
-  if [[ -f /usr/local/bin/slipstream-tunnel ]]; then
+  if [[ -f "$TUNNEL_CMD_BIN" ]]; then
     log "Removing slipstream-tunnel command..."
-    rm -f /usr/local/bin/slipstream-tunnel
+    rm -f "$TUNNEL_CMD_BIN"
   fi
 
-  if [[ -f /usr/local/bin/sst ]]; then
+  if [[ -f "$SST_BIN" ]]; then
     log "Removing sst shortcut..."
-    rm -f /usr/local/bin/sst
+    rm -f "$SST_BIN"
   fi
 
   # Remove health check timer

@@ -1,0 +1,181 @@
+#!/usr/bin/env bats
+
+setup() {
+  export SCRIPT="${BATS_TEST_DIRNAME}/../install.sh"
+  TEST_ROOT="${BATS_TEST_TMPDIR}/integration"
+  export HOME="${TEST_ROOT}/home"
+  export MOCK_BIN="${TEST_ROOT}/mockbin"
+  export TEST_BIN="${TEST_ROOT}/bin"
+  export MOCK_LOG="${TEST_ROOT}/mock.log"
+  export SLIPSTREAM_CLIENT_BIN="${TEST_BIN}/slipstream-client"
+  export TUNNEL_CMD_BIN="${TEST_BIN}/slipstream-tunnel"
+  export SST_BIN="${TEST_BIN}/sst"
+  export PATH="${MOCK_BIN}:$PATH"
+
+  mkdir -p "${HOME}/.tunnel/dnscan" "$MOCK_BIN" "$TEST_BIN"
+  : >"$MOCK_LOG"
+
+  cat >"${MOCK_BIN}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$MOCK_LOG"
+if [[ "$1" == "is-active" ]]; then
+  echo "active"
+fi
+exit 0
+EOF
+  chmod +x "${MOCK_BIN}/systemctl"
+
+  cat >"${MOCK_BIN}/dig" <<'EOF'
+#!/usr/bin/env bash
+server=""
+for arg in "$@"; do
+  if [[ "$arg" == @* ]]; then
+    server="${arg#@}"
+  fi
+done
+
+case "$server" in
+1.1.1.1)
+  sleep 0.01
+  echo "\"ok\""
+  exit 0
+  ;;
+8.8.8.8)
+  sleep 0.06
+  echo "\"ok\""
+  exit 0
+  ;;
+9.9.9.9)
+  sleep 0.01
+  exit 1
+  ;;
+*)
+  echo "\"ok\""
+  exit 0
+  ;;
+esac
+EOF
+  chmod +x "${MOCK_BIN}/dig"
+
+  cat >"${MOCK_BIN}/ping" <<'EOF'
+#!/usr/bin/env bash
+server="${@: -1}"
+case "$server" in
+1.1.1.1) ms="11.1" ;;
+8.8.8.8) ms="42.0" ;;
+9.9.9.9) exit 1 ;;
+*) ms="20.0" ;;
+esac
+echo "64 bytes from $server: icmp_seq=1 ttl=57 time=${ms} ms"
+exit 0
+EOF
+  chmod +x "${MOCK_BIN}/ping"
+
+  cat >"${HOME}/.tunnel/dnscan/dnscan" <<'EOF'
+#!/usr/bin/env bash
+echo "dnscan $*" >>"$MOCK_LOG"
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --output)
+    out="$2"
+    shift 2
+    ;;
+  *)
+    shift
+    ;;
+  esac
+done
+[[ -n "$out" ]] || exit 1
+cat >"$out" <<'EOL'
+8.8.8.8
+1.1.1.1
+9.9.9.9
+EOL
+exit 0
+EOF
+  chmod +x "${HOME}/.tunnel/dnscan/dnscan"
+
+  cat >"$SLIPSTREAM_CLIENT_BIN" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$SLIPSTREAM_CLIENT_BIN"
+
+  cat >"${HOME}/.tunnel/config" <<'EOF'
+DOMAIN=t.example.com
+MODE=client
+CURRENT_SERVER=8.8.8.8
+PORT=7000
+SCAN_SOURCE=generated
+SCAN_COUNTRY=ir
+SCAN_MODE=fast
+SCAN_WORKERS=100
+SCAN_TIMEOUT=2s
+SCAN_THRESHOLD=50
+EOF
+
+  cat >"${HOME}/.tunnel/servers.txt" <<'EOF'
+8.8.8.8
+1.1.1.1
+9.9.9.9
+EOF
+}
+
+@test "servers command prints verified DNS list with latency columns" {
+  cat >"${BATS_TEST_TMPDIR}/run_servers.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+cmd_servers
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_servers.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_servers.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Verified DNS Servers"* ]]
+  [[ "$output" == *"8.8.8.8"* ]]
+  [[ "$output" == *"1.1.1.1"* ]]
+  [[ "$output" == *"Ping(ms)"* ]]
+  [[ "$output" == *"DNS(ms)"* ]]
+}
+
+@test "manual selection switches to chosen DNS and restarts client service" {
+  cat >"${BATS_TEST_TMPDIR}/run_manual_select.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+write_client_service() { echo "$1|$2|$3" >"$HOME/.tunnel/service.args"; }
+cmd_select_server <<<"2"
+grep '^CURRENT_SERVER=1.1.1.1$' "$HOME/.tunnel/config"
+cat "$HOME/.tunnel/service.args"
+grep 'systemctl restart slipstream-client' "$MOCK_LOG"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_manual_select.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_manual_select.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CURRENT_SERVER=1.1.1.1"* ]]
+  [[ "$output" == *"1.1.1.1|t.example.com|7000"* ]]
+  [[ "$output" == *"systemctl restart slipstream-client"* ]]
+}
+
+@test "rescan refreshes servers and chooses the best DNS by latency" {
+  cat >"${BATS_TEST_TMPDIR}/run_rescan.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+write_client_service() { echo "$1|$2|$3" >"$HOME/.tunnel/service.args"; }
+cmd_rescan
+grep '^CURRENT_SERVER=1.1.1.1$' "$HOME/.tunnel/config"
+cat "$HOME/.tunnel/service.args"
+grep '^dnscan ' "$MOCK_LOG"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_rescan.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_rescan.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Switched to best DNS server: 1.1.1.1"* ]]
+  [[ "$output" == *"CURRENT_SERVER=1.1.1.1"* ]]
+  [[ "$output" == *"1.1.1.1|t.example.com|7000"* ]]
+  [[ "$output" == *"dnscan --domain t.example.com"* ]]
+}
