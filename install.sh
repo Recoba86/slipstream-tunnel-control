@@ -1979,7 +1979,7 @@ EOF
 # ============================================
 cmd_health() {
   need_root
-  check_dependencies dig systemctl wc tail date
+  check_dependencies dig systemctl ss journalctl grep wc tail date
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "No tunnel configured"
     exit 0
@@ -1993,6 +1993,28 @@ cmd_health() {
 
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+  # Fast self-heal path for common client failure states.
+  local recover_reason=""
+  if ! systemctl is-active --quiet slipstream-client; then
+    recover_reason="slipstream-client service not active"
+  elif ! ss -lntH "sport = :$PORT" 2>/dev/null | grep -q .; then
+    recover_reason="client listen port $PORT is not open"
+  elif journalctl -u slipstream-client --since "6 minutes ago" --no-pager -l | grep -Eq \
+    'WATCHDOG: main loop stalled|ERROR connection flow blocked'; then
+    recover_reason="recent watchdog/flow-blocked runtime errors detected"
+  fi
+
+  if [[ -n "$recover_reason" ]]; then
+    echo "Self-heal: $recover_reason"
+    echo "[$timestamp] Self-heal triggered: $recover_reason" >>"$HEALTH_LOG"
+    if restart_client_stack; then
+      echo "[$timestamp] Self-heal restart completed" >>"$HEALTH_LOG"
+      sleep 2
+    else
+      echo "[$timestamp] ERROR: self-heal restart failed" >>"$HEALTH_LOG"
+    fi
+  fi
 
   # Test current server latency
   echo "Testing DNS server: $CURRENT_SERVER"
@@ -3060,14 +3082,14 @@ Type=oneshot
 ExecStart=$script_path health
 EOF
 
-  # Create systemd timer (hourly)
+  # Create systemd timer
   cat >/etc/systemd/system/tunnel-health.timer <<EOF
 [Unit]
 Description=DNS Tunnel Health Check Timer
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=1h
+OnUnitActiveSec=5min
 
 [Install]
 WantedBy=timers.target
@@ -3076,7 +3098,7 @@ EOF
   systemctl daemon-reload
   systemctl enable tunnel-health.timer
   systemctl start tunnel-health.timer
-  log "Health check timer installed (runs hourly)"
+  log "Health check timer installed (runs every 5 minutes)"
 }
 
 # ============================================
