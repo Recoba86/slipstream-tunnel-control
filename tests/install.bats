@@ -126,3 +126,13 @@ setup() {
   run bash -lc "source '$SCRIPT'; out=\$(prompt_core_choice nightowl <<< \$'\\n'); [[ \"\$out\" == 'nightowl' ]]"
   [ "$status" -eq 0 ]
 }
+
+@test "arm64 nightowl auto-falls back to plus core when asset is unavailable" {
+  run bash -lc "source '$SCRIPT'; set_slipstream_source nightowl; dest=\$(mktemp /tmp/ss-client.XXXXXX); rm -f \"\$dest\"; download_release_asset_verified(){ local repo=\"\$1\" output=\"\$4\"; if [[ \"\$repo\" == 'Fox-Fig/slipstream-rust-plus-deploy' ]]; then printf '#!/bin/sh\necho ok\n' >\"\$output\"; return 0; fi; return 1; }; download_slipstream_component client \"\$dest\" arm64; [[ \"\$SLIPSTREAM_CORE\" == 'plus' ]] && [[ -x \"\$dest\" ]]" 
+  [ "$status" -eq 0 ]
+}
+
+@test "x86_64 nightowl does not auto-fallback to plus" {
+  run bash -lc "source '$SCRIPT'; set_slipstream_source nightowl; download_release_asset_verified(){ return 1; }; ! download_slipstream_component client /tmp/ss-nope x86_64; [[ \"\$SLIPSTREAM_CORE\" == 'nightowl' ]]"
+  [ "$status" -eq 0 ]
+}

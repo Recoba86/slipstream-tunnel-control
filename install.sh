@@ -583,9 +583,23 @@ download_release_asset_verified() {
   [[ "$actual_sha" == "$expected_sha" ]] || return 1
 }
 
+should_auto_fallback_to_plus_for_arm() {
+  local arch="$1"
+  [[ "$arch" == "arm64" ]] || return 1
+  [[ "$SLIPSTREAM_CORE" == "nightowl" ]] || return 1
+  [[ "$SLIPSTREAM_REPO" == "nightowlnerd/slipstream-rust" ]] || return 1
+  [[ "$SLIPSTREAM_VERSION" == "v0.1.1" ]] || return 1
+  [[ "$SLIPSTREAM_ASSET_LAYOUT" == "tarball" ]] || return 1
+}
+
 download_slipstream_component() {
-  local component="$1" destination="$2" arch="$3"
+  local component="$1" destination="$2" arch="$3" allow_fallback="${4:-true}"
+  local previous_core previous_repo previous_version previous_layout
   local asset
+  previous_core="$SLIPSTREAM_CORE"
+  previous_repo="$SLIPSTREAM_REPO"
+  previous_version="$SLIPSTREAM_VERSION"
+  previous_layout="$SLIPSTREAM_ASSET_LAYOUT"
   asset=$(slipstream_asset_name "$component" "$arch")
 
   case "$SLIPSTREAM_ASSET_LAYOUT" in
@@ -611,7 +625,6 @@ download_slipstream_component() {
     fi
     rm -f "$tmp_tar"
     rm -rf "$tmp_dir"
-    return 1
     ;;
   binary)
     local tmp_bin
@@ -625,12 +638,28 @@ download_slipstream_component() {
       return 0
     fi
     rm -f "$tmp_bin"
-    return 1
     ;;
   *)
     error "Unknown SLIPSTREAM_ASSET_LAYOUT: $SLIPSTREAM_ASSET_LAYOUT"
     ;;
   esac
+
+  if [[ "$allow_fallback" == true ]] && should_auto_fallback_to_plus_for_arm "$arch"; then
+    warn "No Linux ARM64 asset found for core '$SLIPSTREAM_CORE' (${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION})."
+    warn "Auto-switching to core 'plus' for ARM64 compatibility..."
+    set_slipstream_source "plus"
+    if download_slipstream_component "$component" "$destination" "$arch" false; then
+      log "ARM64 download succeeded with fallback core: plus (${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION})"
+      return 0
+    fi
+
+    SLIPSTREAM_CORE="$previous_core"
+    SLIPSTREAM_REPO="$previous_repo"
+    SLIPSTREAM_VERSION="$previous_version"
+    SLIPSTREAM_ASSET_LAYOUT="$previous_layout"
+  fi
+
+  return 1
 }
 
 ensure_service_user() {
