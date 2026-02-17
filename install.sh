@@ -539,19 +539,19 @@ collect_known_resolver_candidates() {
 }
 
 prompt_instance_resolver_or_error() {
-  local out_var="$1" choice="" resolver=""
+  local out_var="$1" choice="" candidate_resolver=""
   local candidates=()
 
-  while IFS= read -r resolver; do
-    [[ -n "$resolver" ]] || continue
-    candidates+=("$resolver")
+  while IFS= read -r candidate_resolver; do
+    [[ -n "$candidate_resolver" ]] || continue
+    candidates+=("$candidate_resolver")
   done < <(collect_known_resolver_candidates)
 
   if [[ ${#candidates[@]} -gt 0 ]]; then
     echo "Known successful DNS resolver IPs:"
     local i=1
-    for resolver in "${candidates[@]}"; do
-      printf "  %d) %s\n" "$i" "$resolver"
+    for candidate_resolver in "${candidates[@]}"; do
+      printf "  %d) %s\n" "$i" "$candidate_resolver"
       i=$((i + 1))
     done
     echo "  0) Enter manually"
@@ -560,20 +560,20 @@ prompt_instance_resolver_or_error() {
     choice="${choice:-1}"
     [[ "$choice" =~ ^[0-9]+$ ]] || error "Invalid selection: $choice"
     if [[ "$choice" == "0" ]]; then
-      prompt_read resolver "DNS resolver IP (server IP): "
-      validate_ipv4_or_error "$resolver"
-      printf -v "$out_var" '%s' "$resolver"
+      prompt_read candidate_resolver "DNS resolver IP (server IP): "
+      validate_ipv4_or_error "$candidate_resolver"
+      printf -v "$out_var" '%s' "$candidate_resolver"
       return 0
     fi
     ((choice >= 1 && choice <= ${#candidates[@]})) || error "Selection out of range: $choice"
-    resolver="${candidates[$((choice - 1))]}"
-    printf -v "$out_var" '%s' "$resolver"
+    candidate_resolver="${candidates[$((choice - 1))]}"
+    printf -v "$out_var" '%s' "$candidate_resolver"
     return 0
   fi
 
-  prompt_read resolver "DNS resolver IP (server IP): "
-  validate_ipv4_or_error "$resolver"
-  printf -v "$out_var" '%s' "$resolver"
+  prompt_read candidate_resolver "DNS resolver IP (server IP): "
+  validate_ipv4_or_error "$candidate_resolver"
+  printf -v "$out_var" '%s' "$candidate_resolver"
 }
 
 load_instance_config_or_error() {
