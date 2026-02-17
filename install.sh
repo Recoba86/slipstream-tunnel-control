@@ -748,6 +748,9 @@ SSH_REMOTE_APP_PORT=$remote_app_port
 EOF
   chown "$SERVICE_USER:$SERVICE_USER" "$SSH_CLIENT_ENV_FILE"
   chmod 600 "$SSH_CLIENT_ENV_FILE"
+  touch "$SSH_CLIENT_ENV_DIR/known_hosts"
+  chown "$SERVICE_USER:$SERVICE_USER" "$SSH_CLIENT_ENV_DIR/known_hosts"
+  chmod 600 "$SSH_CLIENT_ENV_DIR/known_hosts"
 }
 
 write_ssh_client_service() {
@@ -763,7 +766,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 EnvironmentFile=$SSH_CLIENT_ENV_FILE
-ExecStart=/bin/bash -lc 'pass="\$(printf "%s" "\$SSH_TUNNEL_PASS_B64" | base64 -d)"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -L 127.0.0.1:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
+ExecStart=/bin/bash -lc 'pass="\$(printf "%s" "\$SSH_TUNNEL_PASS_B64" | base64 -d)"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$SSH_CLIENT_ENV_DIR/known_hosts -L 127.0.0.1:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -772,6 +775,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
 ProtectHome=true
+ReadWritePaths=$SSH_CLIENT_ENV_DIR
 Restart=always
 RestartSec=3
 
