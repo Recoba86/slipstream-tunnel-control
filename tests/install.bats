@@ -93,3 +93,8 @@ setup() {
   run bash -lc "source '$SCRIPT'; tmp=\$(mktemp -d); mkdir -p \"\$tmp/etc\"; printf 'nameserver 127.0.0.53\n' >\"\$tmp/etc/resolv.conf\"; rm(){ command rm \"\$@\"; }; cp(){ command cp \"\$@\"; }; RESOLV_BACKUP=\"\$tmp/backup\"; TUNNEL_DIR=\"\$tmp\"; sed(){ command sed \"\$@\"; }; awk(){ command awk \"\$@\"; }; ensure_static_resolver_config(){ local needs_write=false; if [[ ! -f \"\$tmp/etc/resolv.conf\" || -L \"\$tmp/etc/resolv.conf\" ]]; then needs_write=true; else local non_loopback_count; non_loopback_count=\$(awk '/^[[:space:]]*nameserver[[:space:]]+/ {if (\$2 !~ /^127\\./) c++} END {print c+0}' \"\$tmp/etc/resolv.conf\" 2>/dev/null || echo \"0\"); [[ \"\$non_loopback_count\" -gt 0 ]] || needs_write=true; fi; if [[ \"\$needs_write\" == true ]]; then printf 'nameserver 8.8.8.8\\nnameserver 1.1.1.1\\n' >\"\$tmp/etc/resolv.conf\"; fi; }; ensure_static_resolver_config; grep -q '^nameserver 8.8.8.8$' \"\$tmp/etc/resolv.conf\""
   [ "$status" -eq 0 ]
 }
+
+@test "service_state returns literal is-active output without duplicate fallback text" {
+  run bash -lc "source '$SCRIPT'; systemctl(){ [[ \"\$1\" == 'is-active' ]] && { echo activating; return 3; }; }; out=\$(service_state slipstream-ssh-client); [[ \"\$out\" == 'activating' ]]"
+  [ "$status" -eq 0 ]
+}

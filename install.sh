@@ -566,6 +566,13 @@ client_ssh_auth_enabled() {
   [[ "${MODE:-}" == "client" ]] && is_true "${SSH_AUTH_ENABLED:-false}"
 }
 
+service_state() {
+  local unit="$1" state
+  state=$(systemctl is-active "$unit" 2>/dev/null || true)
+  [[ -n "$state" ]] || state="not running"
+  echo "$state"
+}
+
 install_self() {
   local install_path="$TUNNEL_CMD_BIN"
   local shortcut_path="$SST_BIN"
@@ -1747,11 +1754,11 @@ cmd_dashboard() {
   [[ "${MODE:-}" == "client" ]] || error "Dashboard is available only in client mode"
 
   local service_status timer_status current_latency now ssh_status
-  service_status=$(systemctl is-active slipstream-client 2>/dev/null || echo "not running")
-  timer_status=$(systemctl is-active tunnel-health.timer 2>/dev/null || echo "not installed")
+  service_status=$(service_state "slipstream-client")
+  timer_status=$(service_state "tunnel-health.timer")
   ssh_status="disabled"
   if client_ssh_auth_enabled; then
-    ssh_status=$(systemctl is-active "${SSH_CLIENT_SERVICE}" 2>/dev/null || echo "not running")
+    ssh_status=$(service_state "${SSH_CLIENT_SERVICE}")
   fi
   now=$(date '+%Y-%m-%d %H:%M:%S')
 
@@ -2370,6 +2377,15 @@ cmd_logs() {
   local follow=false
   [[ "${1:-}" == "-f" ]] && follow=true
 
+  if [[ "${MODE:-}" == "client" ]] && client_ssh_auth_enabled; then
+    if $follow; then
+      journalctl -u slipstream-client -u "${SSH_CLIENT_SERVICE}" -f
+    else
+      journalctl -u slipstream-client -u "${SSH_CLIENT_SERVICE}" -n 100 --no-pager
+    fi
+    return
+  fi
+
   local service_name="slipstream-${MODE:-client}"
 
   if $follow; then
@@ -2408,7 +2424,7 @@ cmd_status() {
   echo "Services:"
   if [[ "${MODE:-}" == "server" ]]; then
     local status
-    status=$(systemctl is-active slipstream-server 2>/dev/null || echo "not running")
+    status=$(service_state "slipstream-server")
     echo "  slipstream-server: $status"
     if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && command -v getent &>/dev/null; then
       local ssh_users
@@ -2418,11 +2434,11 @@ cmd_status() {
     fi
   else
     local status
-    status=$(systemctl is-active slipstream-client 2>/dev/null || echo "not running")
+    status=$(service_state "slipstream-client")
     echo "  slipstream-client: $status"
     if client_ssh_auth_enabled; then
       local ssh_status
-      ssh_status=$(systemctl is-active "${SSH_CLIENT_SERVICE}" 2>/dev/null || echo "not running")
+      ssh_status=$(service_state "${SSH_CLIENT_SERVICE}")
       echo "  ${SSH_CLIENT_SERVICE}: $ssh_status"
     fi
   fi
@@ -2431,7 +2447,7 @@ cmd_status() {
   if [[ "${MODE:-}" == "client" ]]; then
     echo ""
     if systemctl list-unit-files tunnel-health.timer &>/dev/null; then
-      echo "Health timer: $(systemctl is-active tunnel-health.timer 2>/dev/null)"
+      echo "Health timer: $(service_state "tunnel-health.timer")"
     else
       echo "Health timer: not installed"
     fi
