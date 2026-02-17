@@ -2598,39 +2598,21 @@ cmd_auth_list() {
 cmd_menu_client() {
   while true; do
     echo ""
-    cmd_dashboard
-    echo ""
-    echo "=== Client Monitor Menu ==="
-    echo "1) Run health check now"
-    echo "2) Run full DNS rescan now"
-    echo "3) Show status"
-    echo "4) Follow client logs"
-    echo "5) Show verified DNS IP list (live ping + DNS latency)"
-    echo "6) Select DNS manually from verified list"
-    echo "7) Start client tunnel service"
-    echo "8) Stop client tunnel service"
-    echo "9) Restart client tunnel service"
-    echo "10) Edit client settings (domain/port/resolver/auth)"
-    echo "11) Disable client SSH auth overlay (fast profile)"
-    echo "12) Enable client SSH auth overlay (secure profile)"
-    echo "13) Uninstall everything"
+    echo "=== Client Main Menu ==="
+    echo "1) Show dashboard"
+    echo "2) Monitoring submenu"
+    echo "3) Tunnel service submenu"
+    echo "4) Auth/profile submenu"
+    echo "5) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
     case "$choice" in
-    1) cmd_health ;;
-    2) cmd_rescan ;;
-    3) cmd_status ;;
-    4) cmd_logs -f ;;
-    5) cmd_servers ;;
-    6) cmd_select_server ;;
-    7) cmd_start ;;
-    8) cmd_stop ;;
-    9) cmd_restart ;;
-    10) cmd_edit_client ;;
-    11) cmd_client_auth_disable ;;
-    12) cmd_client_auth_enable ;;
-    13)
+    1) cmd_dashboard ;;
+    2) cmd_menu_client_monitor ;;
+    3) cmd_menu_client_service ;;
+    4) cmd_menu_client_auth ;;
+    5)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -2642,51 +2624,159 @@ cmd_menu_client() {
   done
 }
 
-cmd_menu_server() {
+cmd_menu_client_monitor() {
   while true; do
     echo ""
-    cmd_status
+    echo "=== Client Monitoring Submenu ==="
+    echo "1) Run health check now"
+    echo "2) Run full DNS rescan now"
+    echo "3) Show verified DNS IP list (live ping + DNS latency)"
+    echo "4) Select DNS manually from verified list"
+    echo "5) Show status"
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    case "$choice" in
+    1) cmd_health ;;
+    2) cmd_rescan ;;
+    3) cmd_servers ;;
+    4) cmd_select_server ;;
+    5) cmd_status ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu_client_service() {
+  while true; do
     echo ""
-    echo "=== Server Monitor Menu ==="
-    echo "1) Start server tunnel service"
-    echo "2) Stop server tunnel service"
-    echo "3) Restart server tunnel service"
-    echo "4) Show status"
-    echo "5) Follow server logs"
-    echo "6) Edit server settings (domain/port)"
-    echo "7) Add SSH tunnel user"
-    echo "8) Change SSH tunnel user password"
-    echo "9) Delete SSH tunnel user"
-    echo "10) List SSH tunnel users"
-    echo "11) Enable/update SSH auth overlay"
-    echo "12) Disable SSH auth overlay"
-    echo "13) Set speed profile: secure (SSH on)"
-    echo "14) Set speed profile: fast (SSH off)"
-    echo "15) Uninstall everything"
-    echo "0) Exit menu"
+    echo "=== Client Service Submenu ==="
+    echo "1) Start client tunnel service"
+    echo "2) Stop client tunnel service"
+    echo "3) Restart client tunnel service"
+    echo "4) Follow client logs"
+    echo "5) Show status"
+    echo "0) Back"
     read -r -p "Select: " choice
 
     case "$choice" in
     1) cmd_start ;;
     2) cmd_stop ;;
     3) cmd_restart ;;
-    4) cmd_status ;;
-    5) cmd_logs -f ;;
-    6) cmd_edit_server ;;
-    7) cmd_auth_add ;;
-    8) cmd_auth_passwd ;;
-    9) cmd_auth_del ;;
-    10) cmd_auth_list ;;
-    11) cmd_auth_setup ;;
-    12) cmd_auth_disable ;;
-    13) cmd_speed_profile secure ;;
-    14) cmd_speed_profile fast ;;
-    15)
+    4) cmd_logs -f ;;
+    5) cmd_status ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu_client_auth() {
+  while true; do
+    echo ""
+    echo "=== Client Auth/Profile Submenu ==="
+    echo "1) Enable client SSH auth overlay"
+    echo "2) Disable client SSH auth overlay"
+    echo "3) Set speed profile secure"
+    echo "4) Set speed profile fast"
+    echo "5) Show speed profile status"
+    echo "6) Edit client settings (domain/port/resolver/auth)"
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    case "$choice" in
+    1) cmd_client_auth_enable ;;
+    2) cmd_client_auth_disable ;;
+    3) cmd_speed_profile secure ;;
+    4) cmd_speed_profile fast ;;
+    5) cmd_speed_profile status ;;
+    6) cmd_edit_client ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu_server() {
+  while true; do
+    echo ""
+    echo "=== Server Main Menu ==="
+    echo "1) Show status"
+    echo "2) Tunnel service submenu"
+    echo "3) SSH/auth submenu"
+    echo "4) Uninstall everything"
+    echo "0) Exit menu"
+    read -r -p "Select: " choice
+
+    case "$choice" in
+    1) cmd_status ;;
+    2) cmd_menu_server_service ;;
+    3) cmd_menu_server_auth ;;
+    4)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
       break
       ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu_server_service() {
+  while true; do
+    echo ""
+    echo "=== Server Service Submenu ==="
+    echo "1) Start server tunnel service"
+    echo "2) Stop server tunnel service"
+    echo "3) Restart server tunnel service"
+    echo "4) Follow server logs"
+    echo "5) Edit server settings (domain/port)"
+    echo "6) Show status"
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    case "$choice" in
+    1) cmd_start ;;
+    2) cmd_stop ;;
+    3) cmd_restart ;;
+    4) cmd_logs -f ;;
+    5) cmd_edit_server ;;
+    6) cmd_status ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu_server_auth() {
+  while true; do
+    echo ""
+    echo "=== Server SSH/Auth Submenu ==="
+    echo "1) Add SSH tunnel user"
+    echo "2) Change SSH tunnel user password"
+    echo "3) Delete SSH tunnel user"
+    echo "4) List SSH tunnel users"
+    echo "5) Enable/update SSH auth overlay"
+    echo "6) Disable SSH auth overlay"
+    echo "7) Set speed profile secure"
+    echo "8) Set speed profile fast"
+    echo "9) Show speed profile status"
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    case "$choice" in
+    1) cmd_auth_add ;;
+    2) cmd_auth_passwd ;;
+    3) cmd_auth_del ;;
+    4) cmd_auth_list ;;
+    5) cmd_auth_setup ;;
+    6) cmd_auth_disable ;;
+    7) cmd_speed_profile secure ;;
+    8) cmd_speed_profile fast ;;
+    9) cmd_speed_profile status ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
