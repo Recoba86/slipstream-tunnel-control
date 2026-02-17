@@ -2132,6 +2132,7 @@ cmd_edit_client() {
   need_root
   check_dependencies systemctl
   install_self
+  enable_bbr_if_possible
   load_config_or_error
   [[ "${MODE:-}" == "client" ]] || error "Client edit is available only in client mode"
 
@@ -2243,6 +2244,7 @@ cmd_edit_server() {
   need_root
   check_dependencies systemctl openssl
   install_self
+  enable_bbr_if_possible
   load_config_or_error
   [[ "${MODE:-}" == "server" ]] || error "Server edit is available only in server mode"
 
