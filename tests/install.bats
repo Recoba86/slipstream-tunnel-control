@@ -12,10 +12,14 @@ setup() {
 @test "help output includes manual monitoring commands" {
   run bash "$SCRIPT" --help
   [ "$status" -eq 0 ]
+  [[ "$output" == *"start               Start tunnel service"* ]]
+  [[ "$output" == *"stop                Stop tunnel service"* ]]
+  [[ "$output" == *"restart             Restart tunnel service"* ]]
   [[ "$output" == *"rescan"* ]]
   [[ "$output" == *"dashboard"* ]]
   [[ "$output" == *"servers"* ]]
   [[ "$output" == *"menu"* ]]
+  [[ "$output" == *"uninstall           Remove all tunnel components"* ]]
   [[ "$output" == *"m                   Short alias for menu"* ]]
   [[ "$output" == *"sst"* ]]
 }

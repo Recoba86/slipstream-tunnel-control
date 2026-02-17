@@ -50,14 +50,18 @@ Usage: slipstream-tunnel <command> [options]
 Commands:
   server              Setup slipstream server
   client              Setup slipstream client
+  start               Start tunnel service (server/client mode)
+  stop                Stop tunnel service (server/client mode)
+  restart             Restart tunnel service (server/client mode)
   health              Check DNS server and switch if slow
   rescan              Run manual DNS rescan and switch to best server
   dashboard           Show client tunnel dashboard
   servers             Show verified DNS IPs with live latency checks
-  menu                Open interactive client monitor menu
+  menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
   status              Show current status
   logs                View tunnel logs (-f to follow)
+  uninstall           Remove all tunnel components
   remove              Remove all tunnel components
 
 Options:
@@ -74,6 +78,8 @@ Examples:
   slipstream-tunnel server --domain t.example.com --manage-resolver
   slipstream-tunnel client --domain t.example.com
   slipstream-tunnel client --dns-file /tmp/dns-servers.txt
+  slipstream-tunnel stop
+  slipstream-tunnel start
   slipstream-tunnel rescan
   slipstream-tunnel servers
   slipstream-tunnel menu
@@ -1190,22 +1196,79 @@ cmd_select_server() {
   cmd_dashboard
 }
 
-cmd_menu() {
-  need_root
-  load_config_or_error
-  [[ "${MODE:-}" == "client" ]] || error "Menu is available only in client mode"
+service_name_for_mode() {
+  case "${MODE:-}" in
+  server) echo "slipstream-server" ;;
+  client) echo "slipstream-client" ;;
+  *) error "Unsupported mode in config: ${MODE:-unknown}" ;;
+  esac
+}
 
+cmd_start() {
+  need_root
+  check_dependencies systemctl
+  load_config_or_error
+
+  local service_name
+  service_name=$(service_name_for_mode)
+  systemctl start "$service_name"
+
+  if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
+    systemctl start tunnel-health.timer || true
+  fi
+  log "Started: $service_name"
+}
+
+cmd_stop() {
+  need_root
+  check_dependencies systemctl
+  load_config_or_error
+
+  local service_name
+  service_name=$(service_name_for_mode)
+  systemctl stop "$service_name"
+
+  if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
+    systemctl stop tunnel-health.timer || true
+  fi
+  log "Stopped: $service_name"
+}
+
+cmd_restart() {
+  need_root
+  check_dependencies systemctl
+  load_config_or_error
+
+  local service_name
+  service_name=$(service_name_for_mode)
+  systemctl restart "$service_name"
+
+  if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
+    systemctl start tunnel-health.timer || true
+  fi
+  log "Restarted: $service_name"
+}
+
+cmd_uninstall() {
+  cmd_remove
+}
+
+cmd_menu_client() {
   while true; do
     echo ""
     cmd_dashboard
     echo ""
-    echo "=== Manual Monitor Menu ==="
+    echo "=== Client Monitor Menu ==="
     echo "1) Run health check now"
     echo "2) Run full DNS rescan now"
     echo "3) Show status"
     echo "4) Follow client logs"
     echo "5) Show verified DNS IP list (live ping + DNS latency)"
     echo "6) Select DNS manually from verified list"
+    echo "7) Start client tunnel service"
+    echo "8) Stop client tunnel service"
+    echo "9) Restart client tunnel service"
+    echo "10) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -1216,10 +1279,64 @@ cmd_menu() {
     4) cmd_logs -f ;;
     5) cmd_servers ;;
     6) cmd_select_server ;;
+    7) cmd_start ;;
+    8) cmd_stop ;;
+    9) cmd_restart ;;
+    10)
+      read -r -p "Confirm uninstall (y/n): " confirm_uninstall
+      [[ "$confirm_uninstall" == "y" ]] || continue
+      cmd_uninstall
+      break
+      ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
   done
+}
+
+cmd_menu_server() {
+  while true; do
+    echo ""
+    cmd_status
+    echo ""
+    echo "=== Server Monitor Menu ==="
+    echo "1) Start server tunnel service"
+    echo "2) Stop server tunnel service"
+    echo "3) Restart server tunnel service"
+    echo "4) Show status"
+    echo "5) Follow server logs"
+    echo "6) Uninstall everything"
+    echo "0) Exit menu"
+    read -r -p "Select: " choice
+
+    case "$choice" in
+    1) cmd_start ;;
+    2) cmd_stop ;;
+    3) cmd_restart ;;
+    4) cmd_status ;;
+    5) cmd_logs -f ;;
+    6)
+      read -r -p "Confirm uninstall (y/n): " confirm_uninstall
+      [[ "$confirm_uninstall" == "y" ]] || continue
+      cmd_uninstall
+      break
+      ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu() {
+  need_root
+  load_config_or_error
+  if [[ "${MODE:-}" == "client" ]]; then
+    cmd_menu_client
+  elif [[ "${MODE:-}" == "server" ]]; then
+    cmd_menu_server
+  else
+    error "Unsupported mode in config: ${MODE:-unknown}"
+  fi
 }
 
 test_dns_latency() {
@@ -1436,6 +1553,9 @@ main() {
     shift
     cmd_client "$@"
     ;;
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_restart ;;
   health) cmd_health ;;
   rescan) cmd_rescan ;;
   dashboard) cmd_dashboard ;;
@@ -1446,7 +1566,7 @@ main() {
     shift
     cmd_logs "$@"
     ;;
-  remove) cmd_remove ;;
+  uninstall | remove) cmd_uninstall ;;
   -h | --help | help) usage ;;
   *) error "Unknown command: $1" ;;
   esac

@@ -66,6 +66,9 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 ```bash
 slipstream-tunnel server    # راه‌اندازی سرور
 slipstream-tunnel client    # راه‌اندازی کلاینت
+slipstream-tunnel start     # شروع سرویس تونل (بر اساس mode فعلی)
+slipstream-tunnel stop      # توقف سرویس تونل (بر اساس mode فعلی)
+slipstream-tunnel restart   # ری‌استارت سرویس تونل (بر اساس mode فعلی)
 slipstream-tunnel status    # نمایش وضعیت
 slipstream-tunnel logs      # مشاهده لاگ (با -f برای دنبال کردن)
 slipstream-tunnel health    # بررسی DNS و تعویض اگر کند باشد
@@ -73,11 +76,12 @@ slipstream-tunnel rescan    # اسکن دستی DNS و تعویض به بهتر�
 slipstream-tunnel dashboard # داشبورد کوچک کلاینت
 slipstream-tunnel servers   # نمایش کامل DNSهای تاییدشده با ping و latency
 slipstream-tunnel menu      # منوی مانیتورینگ دستی
-sst                         # دستور کوتاه برای باز کردن منوی کلاینت
+sst                         # دستور کوتاه برای باز کردن منوی مانیتورینگ
+slipstream-tunnel uninstall # حذف کامل
 slipstream-tunnel remove    # حذف همه چیز
 ```
 
-داخل `menu` می‌توانید از لیست DNSهای تاییدشده یک IP را دستی انتخاب کنید و همان لحظه سوییچ انجام شود.
+داخل `menu` می‌توانید سرویس را start/stop/restart کنید. در حالت سرور هم گزینه stop و uninstall وجود دارد.
 
 <div dir="rtl">
 

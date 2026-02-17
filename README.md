@@ -52,18 +52,22 @@ Uses a [fork of slipstream-rust](https://github.com/nightowlnerd/slipstream-rust
 ```bash
 slipstream-tunnel server    # Setup server
 slipstream-tunnel client    # Setup client
+slipstream-tunnel start     # Start tunnel service (current mode)
+slipstream-tunnel stop      # Stop tunnel service (current mode)
+slipstream-tunnel restart   # Restart tunnel service (current mode)
 slipstream-tunnel status    # Show current status
 slipstream-tunnel logs      # View logs (add -f to follow)
 slipstream-tunnel health    # Check DNS and switch if slow
 slipstream-tunnel rescan    # Manual DNS rescan + switch best server
 slipstream-tunnel dashboard # Small client dashboard
 slipstream-tunnel servers   # Full verified DNS list (live ping + DNS latency)
-slipstream-tunnel menu      # Interactive monitoring menu
-sst                         # Short command for client menu
+slipstream-tunnel menu      # Interactive monitoring menu (client/server)
+sst                         # Short command for monitor menu
+slipstream-tunnel uninstall # Remove everything
 slipstream-tunnel remove    # Remove everything
 ```
 
-Inside `menu`, you can also manually select a DNS server from the verified list and switch instantly.
+Inside `menu`, you can manually start/stop/restart services. On server mode, the menu also includes stop and uninstall actions.
 
 ## Options
 
