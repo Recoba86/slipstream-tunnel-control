@@ -3414,6 +3414,16 @@ cmd_auth_list() {
   done <<<"$users"
 }
 
+prompt_instance_name_from_menu() {
+  local instance=""
+  read -r -p "Instance name: " instance
+  if [[ -z "$instance" ]]; then
+    warn "Instance name is required"
+    return 1
+  fi
+  echo "$instance"
+}
+
 cmd_menu_client() {
   while true; do
     echo ""
@@ -3422,7 +3432,8 @@ cmd_menu_client() {
     echo "2) Monitoring submenu"
     echo "3) Tunnel service submenu"
     echo "4) Auth/profile submenu"
-    echo "5) Uninstall everything"
+    echo "5) Manage tunnels (multi-instance)"
+    echo "6) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -3431,11 +3442,73 @@ cmd_menu_client() {
     2) cmd_menu_client_monitor ;;
     3) cmd_menu_client_service ;;
     4) cmd_menu_client_auth ;;
-    5)
+    5) cmd_menu_client_instances ;;
+    6)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
       break
+      ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu_client_instances() {
+  while true; do
+    echo ""
+    echo "=== Manage Tunnels Submenu ==="
+    echo "1) Add new tunnel instance"
+    echo "2) List tunnel instances"
+    echo "3) Show one instance status"
+    echo "4) Start one instance"
+    echo "5) Stop one instance"
+    echo "6) Restart one instance"
+    echo "7) Follow one instance logs"
+    echo "8) Delete one instance"
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    local instance=""
+    case "$choice" in
+    1)
+      if instance=$(prompt_instance_name_from_menu); then
+        cmd_instance_add "$instance"
+      fi
+      ;;
+    2) cmd_instance_list ;;
+    3)
+      if instance=$(prompt_instance_name_from_menu); then
+        cmd_instance_status "$instance"
+      fi
+      ;;
+    4)
+      if instance=$(prompt_instance_name_from_menu); then
+        cmd_instance_start "$instance"
+      fi
+      ;;
+    5)
+      if instance=$(prompt_instance_name_from_menu); then
+        cmd_instance_stop "$instance"
+      fi
+      ;;
+    6)
+      if instance=$(prompt_instance_name_from_menu); then
+        cmd_instance_restart "$instance"
+      fi
+      ;;
+    7)
+      if instance=$(prompt_instance_name_from_menu); then
+        cmd_instance_logs "$instance" -f
+      fi
+      ;;
+    8)
+      if instance=$(prompt_instance_name_from_menu); then
+        read -r -p "Delete instance '$instance'? (y/n): " confirm_delete
+        [[ "$confirm_delete" == "y" ]] || continue
+        cmd_instance_del "$instance"
+      fi
       ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
