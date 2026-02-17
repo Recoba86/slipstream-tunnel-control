@@ -3928,11 +3928,11 @@ prompt_tunnel_target_from_menu() {
   done < <(collect_client_tunnel_targets)
 
   if [[ ${#targets[@]} -eq 0 ]]; then
-    warn "No tunnel targets available"
+    warn "No tunnel targets available" >&2
     return 1
   fi
 
-  echo "Select tunnel target:"
+  echo "Select tunnel target:" >&2
   local i=1
   for target in "${targets[@]}"; do
     cfg=$(tunnel_config_file_for_target "$target")
@@ -3941,25 +3941,27 @@ prompt_tunnel_target_from_menu() {
     port=$(config_value_from_file "$cfg" "PORT" || echo "unknown")
     resolver=$(config_value_from_file "$cfg" "CURRENT_SERVER" || true)
     [[ -n "$resolver" ]] || resolver="-"
-    printf " %2d) %-12s service=%-10s port=%-6s resolver=%s\n" "$i" "$target" "$state" "$port" "$resolver"
+    printf " %2d) %-12s service=%-10s port=%-6s resolver=%s\n" "$i" "$target" "$state" "$port" "$resolver" >&2
     i=$((i + 1))
   done
-  echo "  0) Cancel"
+  echo "  0) Cancel" >&2
 
   local choice=""
-  read -r -p "Select: " choice
-  [[ -n "$choice" ]] || return 1
-  [[ "$choice" =~ ^[0-9]+$ ]] || {
-    warn "Invalid selection: $choice"
-    return 1
-  }
-  [[ "$choice" == "0" ]] && return 1
-  ((choice >= 1 && choice <= ${#targets[@]})) || {
-    warn "Selection out of range: $choice"
-    return 1
-  }
-
-  echo "${targets[$((choice - 1))]}"
+  while true; do
+    read -r -p "Select tunnel [1]: " choice
+    choice="${choice:-1}"
+    [[ "$choice" =~ ^[0-9]+$ ]] || {
+      warn "Invalid selection: $choice" >&2
+      continue
+    }
+    [[ "$choice" == "0" ]] && return 1
+    ((choice >= 1 && choice <= ${#targets[@]})) || {
+      warn "Selection out of range: $choice" >&2
+      continue
+    }
+    echo "${targets[$((choice - 1))]}"
+    return 0
+  done
 }
 
 cmd_tunnel_status() {
