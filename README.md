@@ -4,6 +4,8 @@
 
 Slipstream DNS tunnel setup with automatic DNS server scanning via dnscan.
 
+The installer auto-installs missing runtime dependencies (for example `sshpass`, `openssh-client`, and DNS tools) when possible.
+
 ## Quick Start
 
 ### Server (outside Iran)

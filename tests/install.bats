@@ -78,3 +78,8 @@ setup() {
   run bash -lc "source '$SCRIPT'; out=\$(prompt_password_twice 'Test password' <<< \$'secret123\nsecret123\n'); [[ \"\$out\" == 'secret123' ]]"
   [ "$status" -eq 0 ]
 }
+
+@test "package mapping covers ssh auth dependencies for apt-get" {
+  run bash -lc "source '$SCRIPT'; [[ \"\$(package_for_command apt-get sshpass)\" == 'sshpass' ]] && [[ \"\$(package_for_command apt-get ssh)\" == 'openssh-client' ]] && [[ \"\$(package_for_command apt-get sshd)\" == 'openssh-server' ]] && [[ \"\$(package_for_command apt-get dig)\" == 'dnsutils' ]]"
+  [ "$status" -eq 0 ]
+}

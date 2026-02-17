@@ -37,6 +37,8 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+PKG_MANAGER_CACHE="${PKG_MANAGER_CACHE:-}"
+PKG_INDEX_UPDATED="${PKG_INDEX_UPDATED:-0}"
 
 log() { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
@@ -133,7 +135,149 @@ check_dependencies() {
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
-    error "Missing required commands: ${missing[*]}"
+    auto_install_missing_commands "${missing[@]}"
+    local still_missing=()
+    for cmd in "$@"; do
+      command -v "$cmd" &>/dev/null || still_missing+=("$cmd")
+    done
+    [[ ${#still_missing[@]} -eq 0 ]] || error "Missing required commands: ${still_missing[*]}"
+  fi
+}
+
+detect_package_manager() {
+  if [[ -n "$PKG_MANAGER_CACHE" ]]; then
+    echo "$PKG_MANAGER_CACHE"
+    return 0
+  fi
+
+  local managers=(apt-get dnf yum zypper pacman apk)
+  local manager
+  for manager in "${managers[@]}"; do
+    if command -v "$manager" &>/dev/null; then
+      PKG_MANAGER_CACHE="$manager"
+      echo "$manager"
+      return 0
+    fi
+  done
+  return 1
+}
+
+package_for_command() {
+  local manager="$1" cmd="$2"
+  case "$cmd" in
+  dig)
+    case "$manager" in
+    apt-get) echo "dnsutils" ;;
+    dnf | yum) echo "bind-utils" ;;
+    zypper) echo "bind-utils" ;;
+    pacman) echo "bind" ;;
+    apk) echo "bind-tools" ;;
+    esac
+    ;;
+  ssh)
+    case "$manager" in
+    apt-get) echo "openssh-client" ;;
+    dnf | yum) echo "openssh-clients" ;;
+    zypper | pacman | apk) echo "openssh-client" ;;
+    esac
+    ;;
+  sshd)
+    case "$manager" in
+    apt-get | zypper | pacman | apk) echo "openssh-server" ;;
+    dnf | yum) echo "openssh-server" ;;
+    esac
+    ;;
+  sshpass)
+    echo "sshpass"
+    ;;
+  ss)
+    case "$manager" in
+    apt-get) echo "iproute2" ;;
+    dnf | yum | zypper | pacman | apk) echo "iproute2" ;;
+    esac
+    ;;
+  netstat)
+    echo "net-tools"
+    ;;
+  *)
+    return 1
+    ;;
+  esac
+}
+
+install_packages() {
+  local manager="$1"
+  shift
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+
+  case "$manager" in
+  apt-get)
+    if [[ "$PKG_INDEX_UPDATED" != "1" ]]; then
+      log "Updating package index (apt-get update)..."
+      apt-get update
+      PKG_INDEX_UPDATED="1"
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+    ;;
+  dnf)
+    dnf install -y "${packages[@]}"
+    ;;
+  yum)
+    yum install -y "${packages[@]}"
+    ;;
+  zypper)
+    zypper --non-interactive install --no-confirm "${packages[@]}"
+    ;;
+  pacman)
+    pacman -Sy --noconfirm "${packages[@]}"
+    ;;
+  apk)
+    apk add --no-cache "${packages[@]}"
+    ;;
+  *)
+    error "Unsupported package manager: $manager"
+    ;;
+  esac
+}
+
+auto_install_missing_commands() {
+  local missing=("$@")
+  [[ ${#missing[@]} -gt 0 ]] || return 0
+
+  [[ $EUID -eq 0 ]] || error "Missing required commands: ${missing[*]} (run as root for auto-install)"
+  local manager
+  manager=$(detect_package_manager) || error "Missing required commands: ${missing[*]} (no supported package manager found)"
+
+  local packages=() unresolved=()
+  local cmd package
+  for cmd in "${missing[@]}"; do
+    package=$(package_for_command "$manager" "$cmd" || true)
+    if [[ -n "$package" ]]; then
+      packages+=("$package")
+    else
+      unresolved+=("$cmd")
+    fi
+  done
+
+  if [[ ${#unresolved[@]} -gt 0 ]]; then
+    error "Missing required commands: ${unresolved[*]} (auto-install mapping not available)"
+  fi
+
+  local unique_packages=()
+  local pkg
+  declare -A seen_pkgs=()
+  for pkg in "${packages[@]}"; do
+    [[ -n "$pkg" ]] || continue
+    if [[ -z "${seen_pkgs[$pkg]+x}" ]]; then
+      seen_pkgs[$pkg]=1
+      unique_packages+=("$pkg")
+    fi
+  done
+
+  if [[ ${#unique_packages[@]} -gt 0 ]]; then
+    log "Installing missing dependencies: ${unique_packages[*]}"
+    install_packages "$manager" "${unique_packages[@]}" || error "Failed to install required dependencies"
   fi
 }
 
@@ -505,8 +649,7 @@ EOF
 
 apply_ssh_auth_overlay() {
   local tunnel_port="$1"
-  check_dependencies systemctl getent awk tr
-  command -v sshd &>/dev/null || error "sshd not found. Install openssh-server first."
+  check_dependencies systemctl getent awk tr sshd
 
   local ssh_service
   ssh_service=$(detect_ssh_service_name || true)
