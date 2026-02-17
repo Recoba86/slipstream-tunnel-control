@@ -20,6 +20,11 @@ setup() {
   [[ "$output" == *"dashboard"* ]]
   [[ "$output" == *"servers"* ]]
   [[ "$output" == *"menu"* ]]
+  [[ "$output" == *"auth-setup"* ]]
+  [[ "$output" == *"auth-add"* ]]
+  [[ "$output" == *"auth-passwd"* ]]
+  [[ "$output" == *"auth-del"* ]]
+  [[ "$output" == *"auth-list"* ]]
   [[ "$output" == *"uninstall           Remove all tunnel components"* ]]
   [[ "$output" == *"m                   Short alias for menu"* ]]
   [[ "$output" == *"sst"* ]]
@@ -31,4 +36,28 @@ setup() {
 
   run bash -lc "source '$SCRIPT'; is_valid_ipv4 '999.8.8.8'"
   [ "$status" -ne 0 ]
+}
+
+@test "username helper accepts safe unix usernames and rejects bad names" {
+  run bash -lc "source '$SCRIPT'; validate_unix_username_or_error 'client_01'"
+  [ "$status" -eq 0 ]
+
+  run bash -lc "source '$SCRIPT'; validate_unix_username_or_error 'Bad.Name'"
+  [ "$status" -ne 0 ]
+}
+
+@test "client transport port helper uses ssh transport when auth is enabled" {
+  run bash -lc "source '$SCRIPT'; MODE=client; PORT=7000; SSH_AUTH_ENABLED=true; SSH_TRANSPORT_PORT=17070; client_transport_port_from_config"
+  [ "$status" -eq 0 ]
+  [ "$output" = "17070" ]
+}
+
+@test "help output includes ssh auth client/server flags" {
+  run bash "$SCRIPT" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--ssh-auth"* ]]
+  [[ "$output" == *"--ssh-backend-port"* ]]
+  [[ "$output" == *"--ssh-auth-client"* ]]
+  [[ "$output" == *"--ssh-user"* ]]
+  [[ "$output" == *"--ssh-pass"* ]]
 }

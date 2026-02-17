@@ -13,7 +13,7 @@
 </div>
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) server
+curl -fsSL https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh | sudo bash -s -- server
 ```
 
 <div dir="rtl">
@@ -25,7 +25,7 @@ sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunne
 </div>
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) client
+curl -fsSL https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh | sudo bash -s -- client
 ```
 
 <div dir="rtl">
@@ -50,9 +50,11 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 - VPS با دسترسی root
 - دامنه با DNS کلودفلر
 - پنل 3x-ui نصب شده (یا هر پنل V2ray)
+- در صورت استفاده از احراز هویت SSH: نصب بودن OpenSSH Server (`sshd`)
 
 ### کلاینت
 - ماشین لینوکس با دسترسی root
+- در صورت استفاده از auth کلاینت: نصب بودن `ssh` و `sshpass`
 - برای حالت آفلاین:
   - [dnscan releases](https://github.com/nightowlnerd/dnscan/releases)
   - [slipstream releases](https://github.com/nightowlnerd/slipstream-rust/releases)
@@ -78,11 +80,16 @@ slipstream-tunnel dashboard # داشبورد کوچک کلاینت
 slipstream-tunnel servers   # نمایش کامل DNSهای تاییدشده با ping و latency
 slipstream-tunnel menu      # منوی مانیتورینگ دستی
 sst                         # دستور کوتاه برای باز کردن منوی مانیتورینگ
+slipstream-tunnel auth-setup # فعال‌سازی/به‌روزرسانی لایه احراز هویت SSH (سرور)
+slipstream-tunnel auth-add   # ساخت کاربر SSH برای تونل
+slipstream-tunnel auth-passwd # تغییر رمز کاربر SSH تونل
+slipstream-tunnel auth-del   # حذف کاربر SSH تونل
+slipstream-tunnel auth-list  # لیست کاربران SSH تونل
 slipstream-tunnel uninstall # حذف کامل
 slipstream-tunnel remove    # حذف همه چیز
 ```
 
-داخل `menu` می‌توانید تنظیمات (دامنه/پورت) را ویرایش کنید، سرویس را start/stop/restart کنید و uninstall انجام دهید.
+داخل `menu` می‌توانید تنظیمات (دامنه/پورت) را ویرایش کنید، سرویس را start/stop/restart کنید، uninstall انجام دهید و کاربران SSH تونل را مدیریت کنید (در mode سرور).
 
 <div dir="rtl">
 
@@ -96,6 +103,11 @@ slipstream-tunnel remove    # حذف همه چیز
 | `--dnscan` | مسیر فایل dnscan (حالت آفلاین) |
 | `--slipstream` | مسیر باینری slipstream (حالت آفلاین) |
 | `--manage-resolver` | اجازه تغییر resolver روی سرور |
+| `--ssh-auth` | سرور: فعال‌سازی احراز هویت نام‌کاربری/رمز عبور SSH |
+| `--ssh-backend-port` | سرور: پورت SSH پشت slipstream در حالت auth |
+| `--ssh-auth-client` | کلاینت: فعال‌سازی حالت احراز هویت SSH |
+| `--ssh-user` | کلاینت: نام کاربری SSH برای auth |
+| `--ssh-pass` | کلاینت: رمز SSH برای auth |
 
 ## نحوه کار
 
@@ -106,6 +118,7 @@ slipstream-tunnel remove    # حذف همه چیز
 3. تولید گواهی SSL
 4. دانلود و نصب باینری slipstream-server
 5. ساخت و شروع سرویس systemd
+6. اختیاری: فعال‌سازی لایه احراز هویت SSH و ساخت کاربر تونل
 
 ### راه‌اندازی کلاینت
 
@@ -114,7 +127,8 @@ slipstream-tunnel remove    # حذف همه چیز
 3. درخواست تنظیمات اسکن (کشور، حالت، تعداد worker، timeout)
 4. اسکن و تأیید سرورهای DNS با اتصال واقعی تونل
 5. انتخاب سریع‌ترین سرور تأیید شده و شروع slipstream-client
-6. تنظیم بررسی سلامت هر ساعت و باز کردن منوی مانیتورینگ
+6. اختیاری: دریافت نام‌کاربری/رمز و فعال‌سازی لایه SSH روی کلاینت
+7. تنظیم بررسی سلامت هر ساعت و باز کردن منوی مانیتورینگ
 
 ### بررسی سلامت
 

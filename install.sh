@@ -25,6 +25,12 @@ HEALTH_LOG="$TUNNEL_DIR/health.log"
 RESOLV_BACKUP="$TUNNEL_DIR/resolv.conf.backup"
 CERT_DIR="/opt/slipstream/cert"
 SERVICE_USER="slipstream"
+SSH_AUTH_GROUP="slipstream-tunnel"
+SSH_AUTH_CONFIG_DIR="/etc/ssh/sshd_config.d"
+SSH_AUTH_CONFIG_FILE="$SSH_AUTH_CONFIG_DIR/99-slipstream-tunnel.conf"
+SSH_CLIENT_SERVICE="slipstream-ssh-client"
+SSH_CLIENT_ENV_DIR="/etc/slipstream-tunnel"
+SSH_CLIENT_ENV_FILE="$SSH_CLIENT_ENV_DIR/ssh-client.env"
 
 # Colors
 RED='\033[0;31m'
@@ -60,6 +66,11 @@ Commands:
   servers             Show verified DNS IPs with live latency checks
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
+  auth-setup          Enable/update SSH auth overlay for server mode
+  auth-add            Create SSH tunnel user (username/password)
+  auth-passwd         Change SSH tunnel user password
+  auth-del            Delete SSH tunnel user
+  auth-list           List SSH tunnel users
   status              Show current status
   logs                View tunnel logs (-f to follow)
   uninstall           Remove all tunnel components
@@ -73,6 +84,12 @@ Options:
   --dnscan <path>     Path to dnscan tarball (client offline install)
   --dns-file <path>   Custom DNS server list (skips subnet scan)
   --manage-resolver   Server: allow script to manage systemd-resolved/resolv.conf
+  --ssh-auth          Server: enable SSH username/password auth overlay
+  --ssh-backend-port <port>
+                      Server: SSH daemon port behind slipstream when --ssh-auth is enabled (default: 22)
+  --ssh-auth-client   Client: use SSH username/password overlay
+  --ssh-user <name>   Client: SSH username (with --ssh-auth-client)
+  --ssh-pass <pass>   Client: SSH password (with --ssh-auth-client)
 
 Examples:
   slipstream-tunnel server --domain t.example.com
@@ -85,6 +102,7 @@ Examples:
   slipstream-tunnel rescan
   slipstream-tunnel servers
   slipstream-tunnel menu
+  slipstream-tunnel auth-add
   sst
 EOF
   exit 0
@@ -151,6 +169,11 @@ validate_port_or_error() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] || error "Port must be numeric: $port"
   ((port >= 1 && port <= 65535)) || error "Port out of range (1-65535): $port"
+}
+
+validate_unix_username_or_error() {
+  local username="$1"
+  [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || error "Invalid username: $username"
 }
 
 validate_dns_file_or_error() {
@@ -273,6 +296,19 @@ load_config_or_error() {
   source "$CONFIG_FILE"
 }
 
+ensure_mode_server_or_error() {
+  load_config_or_error
+  [[ "${MODE:-}" == "server" ]] || error "This command is available only in server mode"
+}
+
+is_true() {
+  [[ "${1:-}" == "true" ]]
+}
+
+client_ssh_auth_enabled() {
+  [[ "${MODE:-}" == "client" ]] && is_true "${SSH_AUTH_ENABLED:-false}"
+}
+
 install_self() {
   local install_path="$TUNNEL_CMD_BIN"
   local shortcut_path="$SST_BIN"
@@ -302,6 +338,208 @@ exec "$install_path" menu "\$@"
 EOF
   chmod +x "$shortcut_path"
   log "Installed shortcut: sst"
+}
+
+tunnel_nologin_shell() {
+  local shell_path="/usr/sbin/nologin"
+  [[ -x "$shell_path" ]] || shell_path="/sbin/nologin"
+  [[ -x "$shell_path" ]] || shell_path="/usr/bin/false"
+  [[ -x "$shell_path" ]] || shell_path="/bin/false"
+  echo "$shell_path"
+}
+
+detect_ssh_service_name() {
+  local svc
+  for svc in ssh sshd; do
+    if systemctl cat "${svc}.service" >/dev/null 2>&1; then
+      echo "$svc"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ssh_group_users() {
+  getent group "$SSH_AUTH_GROUP" | awk -F: '{print $4}' | tr ',' '\n' | awk 'NF'
+}
+
+ensure_ssh_auth_group() {
+  if getent group "$SSH_AUTH_GROUP" >/dev/null; then
+    return 0
+  fi
+  check_dependencies groupadd
+  groupadd --system "$SSH_AUTH_GROUP"
+}
+
+prompt_password_twice() {
+  local label="${1:-Password}"
+  local password confirm
+  while true; do
+    read -r -s -p "${label}: " password
+    echo ""
+    [[ -n "$password" ]] || {
+      warn "Password cannot be empty"
+      continue
+    }
+    read -r -s -p "Confirm ${label}: " confirm
+    echo ""
+    [[ "$password" == "$confirm" ]] || {
+      warn "Passwords do not match"
+      continue
+    }
+    printf "%s\n" "$password"
+    return 0
+  done
+}
+
+write_ssh_auth_config() {
+  local tunnel_port="$1"
+  validate_port_or_error "$tunnel_port"
+  mkdir -p "$SSH_AUTH_CONFIG_DIR"
+  cat >"$SSH_AUTH_CONFIG_FILE" <<EOF
+# Managed by slipstream-tunnel
+Match Group $SSH_AUTH_GROUP
+    PasswordAuthentication yes
+    KbdInteractiveAuthentication no
+    AuthenticationMethods password
+    AllowTcpForwarding yes
+    AllowAgentForwarding no
+    AllowStreamLocalForwarding no
+    GatewayPorts no
+    PermitTunnel no
+    PermitTTY no
+    X11Forwarding no
+    PermitOpen 127.0.0.1:$tunnel_port
+EOF
+}
+
+apply_ssh_auth_overlay() {
+  local tunnel_port="$1"
+  check_dependencies systemctl getent awk tr
+  command -v sshd &>/dev/null || error "sshd not found. Install openssh-server first."
+
+  local ssh_service
+  ssh_service=$(detect_ssh_service_name || true)
+  [[ -n "$ssh_service" ]] || error "Could not detect SSH service (ssh/sshd)."
+
+  ensure_ssh_auth_group
+  local backup_file=""
+  if [[ -f "$SSH_AUTH_CONFIG_FILE" ]]; then
+    backup_file=$(mktemp /tmp/sshd-slipstream-backup.XXXXXX)
+    cp "$SSH_AUTH_CONFIG_FILE" "$backup_file"
+  fi
+
+  write_ssh_auth_config "$tunnel_port"
+  if ! sshd -t; then
+    if [[ -n "$backup_file" && -f "$backup_file" ]]; then
+      cp "$backup_file" "$SSH_AUTH_CONFIG_FILE"
+    else
+      rm -f "$SSH_AUTH_CONFIG_FILE"
+    fi
+    [[ -n "$backup_file" ]] && rm -f "$backup_file"
+    error "Generated SSH config is invalid. Changes rolled back."
+  fi
+  [[ -n "$backup_file" ]] && rm -f "$backup_file"
+
+  systemctl restart "$ssh_service"
+  log "SSH auth overlay ready (service: $ssh_service, group: $SSH_AUTH_GROUP, permit-open: 127.0.0.1:$tunnel_port)"
+}
+
+create_or_update_tunnel_user() {
+  local username="$1" password="$2"
+  validate_unix_username_or_error "$username"
+  [[ -n "$password" ]] || error "Password cannot be empty"
+
+  ensure_ssh_auth_group
+  local shell_path
+  shell_path=$(tunnel_nologin_shell)
+
+  if id -u "$username" &>/dev/null; then
+    usermod -a -G "$SSH_AUTH_GROUP" "$username"
+  else
+    if command -v useradd &>/dev/null; then
+      useradd --create-home --shell "$shell_path" --groups "$SSH_AUTH_GROUP" "$username"
+    elif command -v adduser &>/dev/null; then
+      adduser --disabled-password --gecos "" --shell "$shell_path" "$username"
+      usermod -a -G "$SSH_AUTH_GROUP" "$username"
+    else
+      error "No user creation command found (need useradd or adduser)"
+    fi
+  fi
+
+  printf '%s:%s\n' "$username" "$password" | chpasswd
+  log "SSH tunnel user ready: $username"
+}
+
+write_ssh_client_env() {
+  local username="$1" password_b64="$2" transport_port="$3" local_port="$4" remote_app_port="$5"
+  validate_unix_username_or_error "$username"
+  validate_port_or_error "$transport_port"
+  validate_port_or_error "$local_port"
+  validate_port_or_error "$remote_app_port"
+  [[ -n "$password_b64" ]] || error "Missing encoded SSH password"
+
+  mkdir -p "$SSH_CLIENT_ENV_DIR"
+  chmod 700 "$SSH_CLIENT_ENV_DIR"
+  cat >"$SSH_CLIENT_ENV_FILE" <<EOF
+SSH_TUNNEL_USER=$username
+SSH_TUNNEL_PASS_B64=$password_b64
+SSH_TRANSPORT_PORT=$transport_port
+SSH_LOCAL_PORT=$local_port
+SSH_REMOTE_APP_PORT=$remote_app_port
+EOF
+  chmod 600 "$SSH_CLIENT_ENV_FILE"
+}
+
+write_ssh_client_service() {
+  cat >/etc/systemd/system/${SSH_CLIENT_SERVICE}.service <<EOF
+[Unit]
+Description=Slipstream SSH Auth Overlay Client
+After=network.target slipstream-client.service
+Requires=slipstream-client.service
+
+[Service]
+Type=simple
+EnvironmentFile=$SSH_CLIENT_ENV_FILE
+ExecStart=/bin/bash -lc 'pass="\$(printf "%s" "\$SSH_TUNNEL_PASS_B64" | base64 -d)"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -L 127.0.0.1:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+remove_ssh_client_service_if_present() {
+  if [[ -f /etc/systemd/system/${SSH_CLIENT_SERVICE}.service ]]; then
+    systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
+    systemctl disable "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${SSH_CLIENT_SERVICE}.service"
+  fi
+  if [[ -f "$SSH_CLIENT_ENV_FILE" ]]; then
+    rm -f "$SSH_CLIENT_ENV_FILE"
+  fi
+}
+
+restart_client_stack() {
+  systemctl restart slipstream-client
+  if client_ssh_auth_enabled && systemctl list-unit-files "${SSH_CLIENT_SERVICE}.service" &>/dev/null; then
+    systemctl restart "${SSH_CLIENT_SERVICE}"
+  fi
+}
+
+start_client_stack() {
+  systemctl start slipstream-client
+  if client_ssh_auth_enabled && systemctl list-unit-files "${SSH_CLIENT_SERVICE}.service" &>/dev/null; then
+    systemctl start "${SSH_CLIENT_SERVICE}"
+  fi
+}
+
+stop_client_stack() {
+  if client_ssh_auth_enabled && systemctl list-unit-files "${SSH_CLIENT_SERVICE}.service" &>/dev/null; then
+    systemctl stop "${SSH_CLIENT_SERVICE}" || true
+  fi
+  systemctl stop slipstream-client
 }
 
 ensure_server_cert() {
@@ -370,6 +608,7 @@ cmd_server() {
   need_root
   check_dependencies curl tar systemctl openssl awk sed grep head tr
   local domain="" port="2053" slipstream_path="" manage_resolver=false
+  local enable_ssh_auth=false ssh_backend_port="22"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -392,6 +631,16 @@ cmd_server() {
       manage_resolver=true
       shift
       ;;
+    --ssh-auth)
+      enable_ssh_auth=true
+      shift
+      ;;
+    --ssh-backend-port)
+      require_flag_value "$1" "${2:-}"
+      ssh_backend_port="$2"
+      enable_ssh_auth=true
+      shift 2
+      ;;
     -h | --help)
       usage
       ;;
@@ -402,6 +651,7 @@ cmd_server() {
   done
 
   validate_port_or_error "$port"
+  validate_port_or_error "$ssh_backend_port"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
 
   log "=== Slipstream Server Setup ==="
@@ -513,10 +763,25 @@ cmd_server() {
     fi
   fi
 
+  if [[ "$enable_ssh_auth" == false && -t 0 ]]; then
+    read -r -p "Enable SSH username/password auth overlay? [Y/n]: " input_enable_auth
+    [[ "${input_enable_auth:-y}" != "n" ]] && enable_ssh_auth=true
+  fi
+
+  if [[ "$enable_ssh_auth" == true && -t 0 ]]; then
+    read -r -p "SSH daemon port on this server [22]: " input_ssh_backend_port
+    [[ -n "$input_ssh_backend_port" ]] && ssh_backend_port="$input_ssh_backend_port"
+    validate_port_or_error "$ssh_backend_port"
+  fi
+
   ensure_server_cert "$domain" false
 
   local arch bin_path="$SLIPSTREAM_SERVER_BIN"
   arch=$(detect_arch)
+  local slipstream_target_port="$port"
+  if [[ "$enable_ssh_auth" == true ]]; then
+    slipstream_target_port="$ssh_backend_port"
+  fi
 
   # Stop existing service
   systemctl stop slipstream-server 2>/dev/null || true
@@ -553,7 +818,7 @@ cmd_server() {
   chmod +x "$bin_path"
 
   log "Creating systemd service..."
-  write_server_service "$domain" "$port"
+  write_server_service "$domain" "$slipstream_target_port"
 
   systemctl daemon-reload
   systemctl enable slipstream-server
@@ -567,7 +832,38 @@ DOMAIN=$domain
 MODE=server
 PORT=$port
 MANAGE_RESOLVER=$manage_resolver
+SSH_AUTH_ENABLED=$enable_ssh_auth
+SSH_BACKEND_PORT=$ssh_backend_port
 EOF
+
+  if [[ "$enable_ssh_auth" == true ]]; then
+    check_dependencies chpasswd usermod
+    apply_ssh_auth_overlay "$port"
+    set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
+    set_config_value "SSH_BACKEND_PORT" "$ssh_backend_port" "$CONFIG_FILE"
+    if [[ -t 0 ]]; then
+      local initial_user initial_password
+      while true; do
+        read -r -p "Create first SSH tunnel username: " initial_user
+        if [[ -z "$initial_user" ]]; then
+          warn "Username cannot be empty"
+          continue
+        fi
+        if [[ "$initial_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+          break
+        fi
+        warn "Invalid username format. Use lowercase letters/numbers/_/-"
+      done
+      initial_password=$(prompt_password_twice "Password for ${initial_user}")
+      create_or_update_tunnel_user "$initial_user" "$initial_password"
+    else
+      warn "Non-interactive session: SSH auth enabled, but no initial user created."
+      warn "Create one with: slipstream-tunnel auth-add"
+    fi
+  else
+    set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
+    set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
+  fi
 
   # Install global command
   install_self
@@ -578,12 +874,17 @@ EOF
   echo "Next steps:"
   echo "  1. In 3x-ui panel: create inbound on port $port"
   echo "  2. On client run the same install command"
+  if [[ "$enable_ssh_auth" == "true" ]]; then
+    echo "  3. On client enable SSH auth overlay and use created username/password"
+  fi
   echo ""
   echo "Commands:"
   echo "  slipstream-tunnel status"
   echo "  slipstream-tunnel edit"
   echo "  slipstream-tunnel stop"
   echo "  slipstream-tunnel start"
+  echo "  slipstream-tunnel auth-add"
+  echo "  slipstream-tunnel auth-list"
   echo "  slipstream-tunnel menu"
   echo "  sst"
   echo "  journalctl -u slipstream-server -f"
@@ -622,6 +923,18 @@ WantedBy=multi-user.target
 EOF
 }
 
+client_transport_port_from_config() {
+  if client_ssh_auth_enabled; then
+    local transport_port="${SSH_TRANSPORT_PORT:-17070}"
+    validate_port_or_error "$transport_port"
+    echo "$transport_port"
+  else
+    local listen_port="${PORT:-7000}"
+    validate_port_or_error "$listen_port"
+    echo "$listen_port"
+  fi
+}
+
 find_best_server() {
   local domain="$1" file="$2"
   local best_server="" best_latency=9999
@@ -649,6 +962,7 @@ cmd_client() {
   check_dependencies curl tar systemctl awk sed grep head wc dig
   local domain="" dnscan_path="" slipstream_path="" port="7000" dns_file=""
   local port_from_flag=false
+  local ssh_auth_client=false ssh_user="" ssh_pass="" ssh_remote_port="2053" ssh_transport_port="17070"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -676,6 +990,22 @@ cmd_client() {
     --dns-file)
       require_flag_value "$1" "${2:-}"
       dns_file="$2"
+      shift 2
+      ;;
+    --ssh-auth-client)
+      ssh_auth_client=true
+      shift
+      ;;
+    --ssh-user)
+      require_flag_value "$1" "${2:-}"
+      ssh_user="$2"
+      ssh_auth_client=true
+      shift 2
+      ;;
+    --ssh-pass)
+      require_flag_value "$1" "${2:-}"
+      ssh_pass="$2"
+      ssh_auth_client=true
       shift 2
       ;;
     -h | --help)
@@ -743,6 +1073,35 @@ cmd_client() {
     [[ -n "$input_port" ]] && port="$input_port"
   fi
   validate_port_or_error "$port"
+
+  if [[ "$ssh_auth_client" == false && -t 0 ]]; then
+    read -r -p "Use SSH username/password auth overlay? [y/N]: " input_ssh_auth_client
+    [[ "${input_ssh_auth_client:-n}" == "y" ]] && ssh_auth_client=true
+  fi
+
+  if [[ "$ssh_auth_client" == true ]]; then
+    check_dependencies ssh sshpass base64
+    if [[ -z "$ssh_user" && -t 0 ]]; then
+      read -r -p "SSH username: " ssh_user
+    fi
+    validate_unix_username_or_error "$ssh_user"
+    if [[ -z "$ssh_pass" ]]; then
+      if [[ -t 0 ]]; then
+        ssh_pass=$(prompt_password_twice "SSH password for ${ssh_user}")
+      else
+        error "In non-interactive mode, --ssh-pass is required with --ssh-auth-client"
+      fi
+    fi
+    if [[ -t 0 ]]; then
+      read -r -p "Remote protected app port on server [2053]: " input_ssh_remote_port
+      [[ -n "$input_ssh_remote_port" ]] && ssh_remote_port="$input_ssh_remote_port"
+      read -r -p "Local internal slipstream port for SSH transport [17070]: " input_ssh_transport_port
+      [[ -n "$input_ssh_transport_port" ]] && ssh_transport_port="$input_ssh_transport_port"
+    fi
+    validate_port_or_error "$ssh_remote_port"
+    validate_port_or_error "$ssh_transport_port"
+    [[ "$ssh_transport_port" != "$port" ]] || error "Internal SSH transport port must differ from client listen port"
+  fi
 
   # Get slipstream binary (required for --verify)
   local slipstream_bin="$TUNNEL_DIR/slipstream-client"
@@ -890,9 +1249,16 @@ cmd_client() {
   log "Using DNS server: $best_server (${best_latency}ms)"
 
   local bin_path="$SLIPSTREAM_CLIENT_BIN"
+  local client_transport_port="$port"
+  local ssh_pass_b64=""
+  if [[ "$ssh_auth_client" == "true" ]]; then
+    client_transport_port="$ssh_transport_port"
+    ssh_pass_b64=$(printf '%s' "$ssh_pass" | base64 | tr -d '\n')
+  fi
 
   # Stop existing service
   systemctl stop slipstream-client 2>/dev/null || true
+  remove_ssh_client_service_if_present
 
   # Install binary if not already in place
   if [[ "$slipstream_bin" != "$bin_path" ]]; then
@@ -903,12 +1269,29 @@ cmd_client() {
 
   # Create systemd service
   log "Creating systemd service..."
-  write_client_service "$best_server" "$domain" "$port"
+  write_client_service "$best_server" "$domain" "$client_transport_port"
+  if [[ "$ssh_auth_client" == "true" ]]; then
+    write_ssh_client_env "$ssh_user" "$ssh_pass_b64" "$ssh_transport_port" "$port" "$ssh_remote_port"
+    write_ssh_client_service
+  fi
 
   systemctl daemon-reload
   systemctl enable slipstream-client
+  if [[ "$ssh_auth_client" == "true" ]]; then
+    systemctl enable "${SSH_CLIENT_SERVICE}"
+  fi
   systemctl restart slipstream-client
+  if [[ "$ssh_auth_client" == "true" ]]; then
+    systemctl restart "${SSH_CLIENT_SERVICE}"
+  fi
   log "Started slipstream-client service"
+
+  if [[ "$ssh_auth_client" != "true" ]]; then
+    ssh_user=""
+    ssh_pass_b64=""
+    ssh_remote_port=""
+    ssh_transport_port=""
+  fi
 
   # Save config
   cat >"$CONFIG_FILE" <<EOF
@@ -923,6 +1306,11 @@ SCAN_MODE=$scan_mode
 SCAN_WORKERS=$scan_workers
 SCAN_TIMEOUT=$scan_timeout
 SCAN_THRESHOLD=$scan_threshold
+SSH_AUTH_ENABLED=$ssh_auth_client
+SSH_AUTH_USER=$ssh_user
+SSH_PASS_B64=$ssh_pass_b64
+SSH_REMOTE_APP_PORT=$ssh_remote_port
+SSH_TRANSPORT_PORT=$ssh_transport_port
 EOF
 
   # Setup health check timer
@@ -935,6 +1323,11 @@ EOF
   echo -e "${GREEN}=== Client Ready ===${NC}"
   echo ""
   echo "Tunnel: 127.0.0.1:$port"
+  if [[ "$ssh_auth_client" == "true" ]]; then
+    echo "Auth mode: SSH username/password overlay (user: $ssh_user)"
+    echo "Internal slipstream transport port: $ssh_transport_port"
+    echo "Remote protected app port: $ssh_remote_port"
+  fi
   echo "DNS server: $best_server"
   echo ""
   echo "Commands:"
@@ -950,6 +1343,9 @@ EOF
   echo "  slipstream-tunnel menu"
   echo "  sst"
   echo "  journalctl -u slipstream-client -f"
+  if [[ "$ssh_auth_client" == "true" ]]; then
+    echo "  journalctl -u ${SSH_CLIENT_SERVICE} -f"
+  fi
   echo ""
   echo "Verified servers saved to: $SERVERS_FILE"
   echo ""
@@ -1002,14 +1398,16 @@ cmd_health() {
       # Update config
       set_config_value "CURRENT_SERVER" "$best_server" "$CONFIG_FILE"
 
-      # Restart client with new server
-      write_client_service "$best_server" "$DOMAIN" "${PORT:-7000}"
-      systemctl daemon-reload
-      if systemctl restart slipstream-client; then
-        echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
-      else
-        echo "[$timestamp] ERROR: service restart failed" >>"$HEALTH_LOG"
-      fi
+	      # Restart client with new server
+	      local transport_port
+	      transport_port=$(client_transport_port_from_config)
+	      write_client_service "$best_server" "$DOMAIN" "$transport_port"
+	      systemctl daemon-reload
+	      if restart_client_stack; then
+	        echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
+	      else
+	        echo "[$timestamp] ERROR: service restart failed" >>"$HEALTH_LOG"
+	      fi
     else
       echo "No better server found"
       echo "[$timestamp] No better server found" >>"$HEALTH_LOG"
@@ -1069,9 +1467,11 @@ cmd_rescan() {
   [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan"
 
   set_config_value "CURRENT_SERVER" "$best_server" "$CONFIG_FILE"
-  write_client_service "$best_server" "$DOMAIN" "${PORT:-7000}"
+  local transport_port
+  transport_port=$(client_transport_port_from_config)
+  write_client_service "$best_server" "$DOMAIN" "$transport_port"
   systemctl daemon-reload
-  systemctl restart slipstream-client
+  restart_client_stack
 
   log "Switched to best DNS server: $best_server (${best_latency}ms)"
   cmd_servers
@@ -1083,18 +1483,24 @@ cmd_dashboard() {
   load_config_or_error
   [[ "${MODE:-}" == "client" ]] || error "Dashboard is available only in client mode"
 
-  local service_status timer_status current_latency now
+  local service_status timer_status current_latency now ssh_status
   service_status=$(systemctl is-active slipstream-client 2>/dev/null || echo "not running")
   timer_status=$(systemctl is-active tunnel-health.timer 2>/dev/null || echo "not installed")
+  ssh_status="disabled"
+  if client_ssh_auth_enabled; then
+    ssh_status=$(systemctl is-active "${SSH_CLIENT_SERVICE}" 2>/dev/null || echo "not running")
+  fi
   now=$(date '+%Y-%m-%d %H:%M:%S')
 
   echo "=== Client Dashboard ==="
   echo "Time: $now"
   echo "Service: $service_status"
+  echo "SSH overlay service: $ssh_status"
   echo "Health timer: $timer_status"
   echo "Domain: ${DOMAIN:-unknown}"
   echo "Port: ${PORT:-7000}"
   echo "Current DNS: ${CURRENT_SERVER:-unknown}"
+  echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
 
   if [[ -n "${CURRENT_SERVER:-}" ]] && command -v dig &>/dev/null; then
     current_latency=$(test_dns_latency "$CURRENT_SERVER" "$DOMAIN" || echo "9999")
@@ -1212,9 +1618,11 @@ cmd_select_server() {
 
   local selected="${servers[$((choice - 1))]}"
   set_config_value "CURRENT_SERVER" "$selected" "$CONFIG_FILE"
-  write_client_service "$selected" "$DOMAIN" "${PORT:-7000}"
+  local transport_port
+  transport_port=$(client_transport_port_from_config)
+  write_client_service "$selected" "$DOMAIN" "$transport_port"
   systemctl daemon-reload
-  systemctl restart slipstream-client
+  restart_client_stack
   log "Manually switched to DNS server: $selected"
   cmd_dashboard
 }
@@ -1234,7 +1642,11 @@ cmd_start() {
 
   local service_name
   service_name=$(service_name_for_mode)
-  systemctl start "$service_name"
+  if [[ "${MODE:-}" == "client" ]]; then
+    start_client_stack
+  else
+    systemctl start "$service_name"
+  fi
 
   if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
     systemctl start tunnel-health.timer || true
@@ -1249,7 +1661,11 @@ cmd_stop() {
 
   local service_name
   service_name=$(service_name_for_mode)
-  systemctl stop "$service_name"
+  if [[ "${MODE:-}" == "client" ]]; then
+    stop_client_stack
+  else
+    systemctl stop "$service_name"
+  fi
 
   if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
     systemctl stop tunnel-health.timer || true
@@ -1264,7 +1680,11 @@ cmd_restart() {
 
   local service_name
   service_name=$(service_name_for_mode)
-  systemctl restart "$service_name"
+  if [[ "${MODE:-}" == "client" ]]; then
+    restart_client_stack
+  else
+    systemctl restart "$service_name"
+  fi
 
   if [[ "${MODE:-}" == "client" ]] && systemctl list-unit-files tunnel-health.timer &>/dev/null; then
     systemctl start tunnel-health.timer || true
@@ -1285,6 +1705,11 @@ cmd_edit_client() {
   local new_domain="${DOMAIN:-}"
   local new_port="${PORT:-7000}"
   local new_server="${CURRENT_SERVER:-}"
+  local new_ssh_auth="${SSH_AUTH_ENABLED:-false}"
+  local new_ssh_user="${SSH_AUTH_USER:-}"
+  local new_ssh_pass_b64="${SSH_PASS_B64:-}"
+  local new_ssh_remote_port="${SSH_REMOTE_APP_PORT:-2053}"
+  local new_ssh_transport_port="${SSH_TRANSPORT_PORT:-17070}"
   local input
 
   echo "=== Edit Client Settings ==="
@@ -1294,6 +1719,10 @@ cmd_edit_client() {
   [[ -n "$input" ]] && new_port="$input"
   read -r -p "DNS resolver IP [$new_server]: " input
   [[ -n "$input" ]] && new_server="$input"
+  read -r -p "Use SSH username/password auth overlay? [y/N] (current: ${new_ssh_auth}): " input
+  if [[ -n "$input" ]]; then
+    [[ "$input" == "y" ]] && new_ssh_auth=true || new_ssh_auth=false
+  fi
 
   validate_domain_or_error "$new_domain"
   validate_port_or_error "$new_port"
@@ -1304,12 +1733,51 @@ cmd_edit_client() {
   fi
   [[ -n "$new_server" ]] || error "No DNS resolver available. Run 'slipstream-tunnel rescan' first."
 
+  if [[ "$new_ssh_auth" == "true" ]]; then
+    check_dependencies ssh sshpass base64
+    read -r -p "SSH username [$new_ssh_user]: " input
+    [[ -n "$input" ]] && new_ssh_user="$input"
+    validate_unix_username_or_error "$new_ssh_user"
+    read -r -p "Remote protected app port [$new_ssh_remote_port]: " input
+    [[ -n "$input" ]] && new_ssh_remote_port="$input"
+    read -r -p "Local internal slipstream port for SSH transport [$new_ssh_transport_port]: " input
+    [[ -n "$input" ]] && new_ssh_transport_port="$input"
+    validate_port_or_error "$new_ssh_remote_port"
+    validate_port_or_error "$new_ssh_transport_port"
+    [[ "$new_ssh_transport_port" != "$new_port" ]] || error "Internal SSH transport port must differ from client listen port"
+    read -r -p "Change SSH password now? [y/N]: " input
+    if [[ "$input" == "y" || -z "$new_ssh_pass_b64" ]]; then
+      local plain_pass
+      plain_pass=$(prompt_password_twice "SSH password for ${new_ssh_user}")
+      new_ssh_pass_b64=$(printf '%s' "$plain_pass" | base64 | tr -d '\n')
+    fi
+  fi
+
   set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
   set_config_value "PORT" "$new_port" "$CONFIG_FILE"
   set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
-  write_client_service "$new_server" "$new_domain" "$new_port"
+  if [[ "$new_ssh_auth" == "true" ]]; then
+    set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
+    set_config_value "SSH_AUTH_USER" "$new_ssh_user" "$CONFIG_FILE"
+    set_config_value "SSH_PASS_B64" "$new_ssh_pass_b64" "$CONFIG_FILE"
+    set_config_value "SSH_REMOTE_APP_PORT" "$new_ssh_remote_port" "$CONFIG_FILE"
+    set_config_value "SSH_TRANSPORT_PORT" "$new_ssh_transport_port" "$CONFIG_FILE"
+    write_client_service "$new_server" "$new_domain" "$new_ssh_transport_port"
+    write_ssh_client_env "$new_ssh_user" "$new_ssh_pass_b64" "$new_ssh_transport_port" "$new_port" "$new_ssh_remote_port"
+    write_ssh_client_service
+    SSH_AUTH_ENABLED="true"
+  else
+    set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
+    set_config_value "SSH_AUTH_USER" "" "$CONFIG_FILE"
+    set_config_value "SSH_PASS_B64" "" "$CONFIG_FILE"
+    set_config_value "SSH_REMOTE_APP_PORT" "" "$CONFIG_FILE"
+    set_config_value "SSH_TRANSPORT_PORT" "" "$CONFIG_FILE"
+    write_client_service "$new_server" "$new_domain" "$new_port"
+    remove_ssh_client_service_if_present
+    SSH_AUTH_ENABLED="false"
+  fi
   systemctl daemon-reload
-  systemctl restart slipstream-client
+  restart_client_stack
 
   log "Client settings updated and service restarted"
   cmd_dashboard
@@ -1323,13 +1791,19 @@ cmd_edit_server() {
 
   local new_domain="${DOMAIN:-}"
   local new_port="${PORT:-2053}"
+  local ssh_backend_port="${SSH_BACKEND_PORT:-22}"
   local input regenerate_cert=false
 
   echo "=== Edit Server Settings ==="
   read -r -p "Domain [$new_domain]: " input
   [[ -n "$input" ]] && new_domain="$input"
-  read -r -p "Target port [$new_port]: " input
+  read -r -p "Protected app port [$new_port]: " input
   [[ -n "$input" ]] && new_port="$input"
+  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+    read -r -p "SSH backend port for slipstream [$ssh_backend_port]: " input
+    [[ -n "$input" ]] && ssh_backend_port="$input"
+    validate_port_or_error "$ssh_backend_port"
+  fi
 
   validate_domain_or_error "$new_domain"
   validate_port_or_error "$new_port"
@@ -1342,9 +1816,19 @@ cmd_edit_server() {
   ensure_server_cert "$new_domain" "$regenerate_cert"
   set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
   set_config_value "PORT" "$new_port" "$CONFIG_FILE"
-  write_server_service "$new_domain" "$new_port"
+  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+    set_config_value "SSH_BACKEND_PORT" "$ssh_backend_port" "$CONFIG_FILE"
+    write_server_service "$new_domain" "$ssh_backend_port"
+  else
+    set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
+    write_server_service "$new_domain" "$new_port"
+  fi
   systemctl daemon-reload
   systemctl restart slipstream-server
+
+  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+    apply_ssh_auth_overlay "$new_port"
+  fi
 
   log "Server settings updated and service restarted"
   cmd_status
@@ -1358,6 +1842,114 @@ cmd_edit() {
   server) cmd_edit_server ;;
   *) error "Unsupported mode in config: ${MODE:-unknown}" ;;
   esac
+}
+
+cmd_auth_setup() {
+  need_root
+  check_dependencies systemctl getent awk tr
+  ensure_mode_server_or_error
+
+  local app_port="${PORT:-2053}"
+  local ssh_backend_port="${SSH_BACKEND_PORT:-22}"
+  read -r -p "Protected app port [$app_port]: " input_port
+  [[ -n "$input_port" ]] && app_port="$input_port"
+  validate_port_or_error "$app_port"
+
+  read -r -p "SSH backend port for slipstream [$ssh_backend_port]: " input_port
+  [[ -n "$input_port" ]] && ssh_backend_port="$input_port"
+  validate_port_or_error "$ssh_backend_port"
+
+  apply_ssh_auth_overlay "$app_port"
+  set_config_value "PORT" "$app_port" "$CONFIG_FILE"
+  set_config_value "SSH_BACKEND_PORT" "$ssh_backend_port" "$CONFIG_FILE"
+  write_server_service "$DOMAIN" "$ssh_backend_port"
+  systemctl daemon-reload
+  systemctl restart slipstream-server
+  set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
+  log "SSH auth overlay enabled. Users authenticate via SSH before reaching 127.0.0.1:$app_port."
+}
+
+cmd_auth_add() {
+  need_root
+  check_dependencies getent awk tr chpasswd usermod
+  ensure_mode_server_or_error
+
+  if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
+    warn "SSH auth overlay is disabled. Running setup first..."
+    cmd_auth_setup
+    load_config_or_error
+  fi
+
+  local username="${1:-}" password
+  if [[ -z "$username" ]]; then
+    read -r -p "New SSH tunnel username: " username
+  fi
+  validate_unix_username_or_error "$username"
+  password=$(prompt_password_twice "Password for ${username}")
+  create_or_update_tunnel_user "$username" "$password"
+}
+
+cmd_auth_passwd() {
+  need_root
+  check_dependencies chpasswd id
+  ensure_mode_server_or_error
+
+  local username="${1:-}" password
+  if [[ -z "$username" ]]; then
+    read -r -p "SSH tunnel username to update password: " username
+  fi
+  validate_unix_username_or_error "$username"
+  id -u "$username" >/dev/null || error "User does not exist: $username"
+  password=$(prompt_password_twice "New password for ${username}")
+  printf '%s:%s\n' "$username" "$password" | chpasswd
+  log "Password updated for: $username"
+}
+
+cmd_auth_del() {
+  need_root
+  check_dependencies userdel id tr grep
+  ensure_mode_server_or_error
+
+  local username="${1:-}"
+  if [[ -z "$username" ]]; then
+    read -r -p "SSH tunnel username to delete: " username
+  fi
+  validate_unix_username_or_error "$username"
+  id -u "$username" >/dev/null || error "User does not exist: $username"
+
+  if ! id -nG "$username" | tr ' ' '\n' | grep -qx "$SSH_AUTH_GROUP"; then
+    error "User is not managed by tunnel auth group ($SSH_AUTH_GROUP): $username"
+  fi
+
+  read -r -p "Delete user '$username' and home directory? [y/N]: " confirm_delete
+  [[ "${confirm_delete:-n}" == "y" ]] || {
+    echo "Canceled"
+    return 0
+  }
+  userdel -r "$username" 2>/dev/null || userdel "$username"
+  log "Deleted SSH tunnel user: $username"
+}
+
+cmd_auth_list() {
+  check_dependencies getent awk tr
+  ensure_mode_server_or_error
+  echo "=== SSH Tunnel Users ==="
+  echo "Group: $SSH_AUTH_GROUP"
+  if ! getent group "$SSH_AUTH_GROUP" >/dev/null; then
+    echo "No auth group found."
+    return 0
+  fi
+
+  local users
+  users=$(ssh_group_users || true)
+  if [[ -z "$users" ]]; then
+    echo "No users in group."
+    return 0
+  fi
+  while IFS= read -r user; do
+    [[ -z "$user" ]] && continue
+    echo "  - $user"
+  done <<<"$users"
 }
 
 cmd_menu_client() {
@@ -1375,7 +1967,7 @@ cmd_menu_client() {
     echo "7) Start client tunnel service"
     echo "8) Stop client tunnel service"
     echo "9) Restart client tunnel service"
-    echo "10) Edit client settings (domain/port/resolver)"
+    echo "10) Edit client settings (domain/port/resolver/auth)"
     echo "11) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
@@ -1415,7 +2007,12 @@ cmd_menu_server() {
     echo "4) Show status"
     echo "5) Follow server logs"
     echo "6) Edit server settings (domain/port)"
-    echo "7) Uninstall everything"
+    echo "7) Add SSH tunnel user"
+    echo "8) Change SSH tunnel user password"
+    echo "9) Delete SSH tunnel user"
+    echo "10) List SSH tunnel users"
+    echo "11) Enable/update SSH auth overlay"
+    echo "12) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -1426,7 +2023,12 @@ cmd_menu_server() {
     4) cmd_status ;;
     5) cmd_logs -f ;;
     6) cmd_edit_server ;;
-    7)
+    7) cmd_auth_add ;;
+    8) cmd_auth_passwd ;;
+    9) cmd_auth_del ;;
+    10) cmd_auth_list ;;
+    11) cmd_auth_setup ;;
+    12)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -1528,6 +2130,12 @@ cmd_status() {
     echo "Domain: $DOMAIN"
     echo "Port: ${PORT:-7000}"
     [[ -n "${CURRENT_SERVER:-}" ]] && echo "Current DNS: $CURRENT_SERVER"
+    if [[ "${MODE:-}" == "server" ]]; then
+      echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
+    else
+      echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
+      [[ -n "${SSH_AUTH_USER:-}" ]] && echo "SSH user: $SSH_AUTH_USER"
+    fi
   else
     echo "Not configured"
     return
@@ -1539,10 +2147,21 @@ cmd_status() {
     local status
     status=$(systemctl is-active slipstream-server 2>/dev/null || echo "not running")
     echo "  slipstream-server: $status"
+    if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && command -v getent &>/dev/null; then
+      local ssh_users
+      ssh_users=$(ssh_group_users | tr '\n' ',' | sed 's/,$//')
+      [[ -z "$ssh_users" ]] && ssh_users="none"
+      echo "  ssh-auth users: $ssh_users"
+    fi
   else
     local status
     status=$(systemctl is-active slipstream-client 2>/dev/null || echo "not running")
     echo "  slipstream-client: $status"
+    if client_ssh_auth_enabled; then
+      local ssh_status
+      ssh_status=$(systemctl is-active "${SSH_CLIENT_SERVICE}" 2>/dev/null || echo "not running")
+      echo "  ${SSH_CLIENT_SERVICE}: $ssh_status"
+    fi
   fi
 
   # Health timer only relevant for client
@@ -1585,6 +2204,13 @@ cmd_remove() {
     rm -f /etc/systemd/system/slipstream-client.service
   fi
 
+  if [[ -f /etc/systemd/system/${SSH_CLIENT_SERVICE}.service ]]; then
+    log "Stopping ${SSH_CLIENT_SERVICE} service..."
+    systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
+    systemctl disable "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${SSH_CLIENT_SERVICE}.service"
+  fi
+
   # Remove binaries
   if [[ -f "$SLIPSTREAM_SERVER_BIN" ]]; then
     log "Removing slipstream-server binary..."
@@ -1606,6 +2232,14 @@ cmd_remove() {
     rm -f "$SST_BIN"
   fi
 
+  if [[ -f "$SSH_CLIENT_ENV_FILE" ]]; then
+    log "Removing SSH client auth env..."
+    rm -f "$SSH_CLIENT_ENV_FILE"
+  fi
+  if [[ -d "$SSH_CLIENT_ENV_DIR" ]]; then
+    rmdir "$SSH_CLIENT_ENV_DIR" 2>/dev/null || true
+  fi
+
   # Remove health check timer
   if [[ -f /etc/systemd/system/tunnel-health.timer ]]; then
     log "Removing health check timer..."
@@ -1621,6 +2255,40 @@ cmd_remove() {
   if [[ -d "$CERT_DIR" ]]; then
     log "Removing certificates..."
     rm -rf "$CERT_DIR"
+  fi
+
+  # Remove SSH auth overlay and managed users
+  if [[ -f "$SSH_AUTH_CONFIG_FILE" ]]; then
+    read -r -p "Remove SSH auth overlay config? (y/n): " remove_ssh_overlay
+    if [[ "$remove_ssh_overlay" == "y" ]]; then
+      rm -f "$SSH_AUTH_CONFIG_FILE"
+      if command -v sshd &>/dev/null && sshd -t; then
+        local ssh_service
+        ssh_service=$(detect_ssh_service_name || true)
+        [[ -n "$ssh_service" ]] && systemctl restart "$ssh_service" || true
+      fi
+      log "Removed SSH auth overlay config"
+    fi
+  fi
+
+  if command -v getent &>/dev/null && getent group "$SSH_AUTH_GROUP" >/dev/null 2>&1; then
+    local auth_users
+    auth_users=$(ssh_group_users | tr '\n' ' ')
+    if [[ -n "$auth_users" ]]; then
+      read -r -p "Delete SSH tunnel users ($auth_users)? (y/n): " remove_ssh_users
+      if [[ "$remove_ssh_users" == "y" ]]; then
+        local auth_user
+        while IFS= read -r auth_user; do
+          [[ -z "$auth_user" ]] && continue
+          userdel -r "$auth_user" 2>/dev/null || userdel "$auth_user" 2>/dev/null || true
+        done <<<"$(ssh_group_users)"
+        log "Removed SSH tunnel users"
+      fi
+    fi
+    read -r -p "Delete SSH auth group '$SSH_AUTH_GROUP'? (y/n): " remove_ssh_group
+    if [[ "$remove_ssh_group" == "y" ]]; then
+      groupdel "$SSH_AUTH_GROUP" 2>/dev/null || true
+    fi
   fi
 
   # Restore resolver settings if script changed them.
@@ -1673,6 +2341,20 @@ main() {
   dashboard) cmd_dashboard ;;
   servers) cmd_servers ;;
   menu | m) cmd_menu ;;
+  auth-setup) cmd_auth_setup ;;
+  auth-add)
+    shift
+    cmd_auth_add "${1:-}"
+    ;;
+  auth-passwd)
+    shift
+    cmd_auth_passwd "${1:-}"
+    ;;
+  auth-del)
+    shift
+    cmd_auth_del "${1:-}"
+    ;;
+  auth-list) cmd_auth_list ;;
   status) cmd_status ;;
   logs)
     shift

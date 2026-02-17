@@ -9,7 +9,7 @@ Slipstream DNS tunnel setup with automatic DNS server scanning via dnscan.
 ### Server (outside Iran)
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) server
+curl -fsSL https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh | sudo bash -s -- server
 ```
 
 Follow the prompts to configure Cloudflare DNS.
@@ -17,7 +17,7 @@ Follow the prompts to configure Cloudflare DNS.
 ### Client (inside Iran)
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh) client
+curl -fsSL https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh | sudo bash -s -- client
 ```
 
 After install, `slipstream-tunnel` command is available globally.
@@ -37,10 +37,12 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 - VPS with root access
 - Domain with Cloudflare DNS
 - 3x-ui panel installed (or any V2ray panel)
+- OpenSSH server installed (`sshd`) if using SSH auth overlay
 
 ### Client
 
 - Linux machine with root access
+- `ssh` + `sshpass` installed if using SSH auth client overlay
 - For offline:
   - [dnscan releases](https://github.com/nightowlnerd/dnscan/releases)
   - [slipstream releases](https://github.com/nightowlnerd/slipstream-rust/releases)
@@ -64,11 +66,16 @@ slipstream-tunnel dashboard # Small client dashboard
 slipstream-tunnel servers   # Full verified DNS list (live ping + DNS latency)
 slipstream-tunnel menu      # Interactive monitoring menu (client/server)
 sst                         # Short command for monitor menu
+slipstream-tunnel auth-setup # Enable/update SSH auth overlay (server mode)
+slipstream-tunnel auth-add   # Create SSH tunnel user
+slipstream-tunnel auth-passwd # Change SSH tunnel user password
+slipstream-tunnel auth-del   # Delete SSH tunnel user
+slipstream-tunnel auth-list  # List SSH tunnel users
 slipstream-tunnel uninstall # Remove everything
 slipstream-tunnel remove    # Remove everything
 ```
 
-Inside `menu`, you can manually edit settings (domain/port), start/stop/restart services, and uninstall.
+Inside `menu`, you can manually edit settings (domain/port), start/stop/restart services, uninstall, and manage SSH auth users (server mode).
 
 ## Options
 
@@ -80,6 +87,11 @@ Inside `menu`, you can manually edit settings (domain/port), start/stop/restart 
 | `--dnscan`     | Path to dnscan tarball (offline mode)     |
 | `--slipstream` | Path to slipstream binary (offline mode)  |
 | `--manage-resolver` | Allow server setup to edit resolver config |
+| `--ssh-auth`   | Server: enable SSH username/password auth overlay |
+| `--ssh-backend-port` | Server: SSH daemon port behind slipstream when auth is enabled |
+| `--ssh-auth-client` | Client: enable SSH username/password overlay |
+| `--ssh-user`   | Client: SSH username for auth overlay |
+| `--ssh-pass`   | Client: SSH password for auth overlay |
 
 ## How It Works
 
@@ -90,6 +102,7 @@ Inside `menu`, you can manually edit settings (domain/port), start/stop/restart 
 3. Generates self-signed certificate
 4. Downloads and installs slipstream-server binary
 5. Creates and starts systemd service
+6. Optional: enables SSH auth overlay and creates tunnel users
 
 ### Client Setup
 
@@ -98,7 +111,8 @@ Inside `menu`, you can manually edit settings (domain/port), start/stop/restart 
 3. Prompts for scan settings (country, mode, workers, timeout)
 4. Scans and verifies DNS servers with actual tunnel connection
 5. Picks fastest verified server and starts slipstream-client
-6. Sets up hourly health check and opens interactive monitor menu
+6. Optional: asks SSH username/password and enables client SSH auth overlay
+7. Sets up hourly health check and opens interactive monitor menu
 
 ### Health Check
 
@@ -108,6 +122,14 @@ Inside `menu`, you can manually edit settings (domain/port), start/stop/restart 
 - Logs to `~/.tunnel/health.log`
 - You can trigger checks manually with `slipstream-tunnel health` or full rescan with `slipstream-tunnel rescan`
 - Use `slipstream-tunnel dashboard` or `slipstream-tunnel menu` for manual monitoring
+
+## SSH Auth Overlay
+
+- During `server` setup, you can enable SSH username/password overlay.
+- Script creates a dedicated SSH match-group (`slipstream-tunnel`) and tunnel users.
+- Tunnel users are restricted to port-forwarding rules (no normal shell access expected).
+- During `client` setup, you can enable SSH auth client mode and provide username/password.
+- Manage server users later with: `auth-add`, `auth-passwd`, `auth-del`, `auth-list`.
 
 ## Files
 

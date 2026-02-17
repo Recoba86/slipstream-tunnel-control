@@ -203,3 +203,65 @@ EOF
   [[ "$output" == *"CURRENT_SERVER=1.1.1.1"* ]]
   [[ "$output" == *"1.1.1.1|new.example.com|7100"* ]]
 }
+
+@test "auth list prints SSH tunnel users in server mode" {
+  cat >"${BATS_TEST_TMPDIR}/run_auth_list.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+check_dependencies() { :; }
+load_config_or_error() {
+  MODE=server
+  SSH_AUTH_ENABLED=true
+  PORT=2053
+}
+ssh_group_users() {
+  printf "alice\nbob\n"
+}
+getent() {
+  [[ "$1" == "group" && "$2" == "$SSH_AUTH_GROUP" ]] && return 0
+  return 2
+}
+cmd_auth_list
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_auth_list.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_auth_list.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SSH Tunnel Users"* ]]
+  [[ "$output" == *"alice"* ]]
+  [[ "$output" == *"bob"* ]]
+}
+
+@test "auth setup rewires server service to ssh backend and updates config" {
+  cat >"${HOME}/.tunnel/config" <<'EOF'
+DOMAIN=t.example.com
+MODE=server
+PORT=2053
+SSH_AUTH_ENABLED=false
+SSH_BACKEND_PORT=22
+EOF
+
+  cat >"${BATS_TEST_TMPDIR}/run_auth_setup.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+check_dependencies() { :; }
+apply_ssh_auth_overlay() { echo "overlay:$1" >"$HOME/.tunnel/overlay.arg"; }
+write_server_service() { echo "$1|$2" >"$HOME/.tunnel/server_service.args"; }
+cmd_auth_setup <<< $'2100\n2222\n'
+cat "$HOME/.tunnel/overlay.arg"
+cat "$HOME/.tunnel/server_service.args"
+grep '^PORT=2100$' "$HOME/.tunnel/config"
+grep '^SSH_BACKEND_PORT=2222$' "$HOME/.tunnel/config"
+grep '^SSH_AUTH_ENABLED=true$' "$HOME/.tunnel/config"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_auth_setup.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_auth_setup.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"overlay:2100"* ]]
+  [[ "$output" == *"t.example.com|2222"* ]]
+  [[ "$output" == *"PORT=2100"* ]]
+  [[ "$output" == *"SSH_BACKEND_PORT=2222"* ]]
+  [[ "$output" == *"SSH_AUTH_ENABLED=true"* ]]
+}
