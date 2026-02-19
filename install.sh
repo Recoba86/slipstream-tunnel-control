@@ -3927,7 +3927,7 @@ cmd_instance_edit() {
       [[ -n "$input" ]] && new_bridge_local_app_port="$input"
       validate_port_or_error "$new_bridge_local_app_port"
       [[ "$new_bridge_local_app_port" != "$new_port" ]] || error "Local VLESS app port must differ from DNSTT transport port"
-      if [[ "$new_bridge_local_app_port" != "${DNSTT_SSH_LOCAL_APP_PORT:-}" ]] && port_in_use "$new_bridge_local_app_port"; then
+      if [[ "$new_bridge_local_app_port" != "${DNSTT_SSH_LOCAL_APP_PORT:-}" && "$new_bridge_local_app_port" != "$old_port" ]] && port_in_use "$new_bridge_local_app_port"; then
         error "Local VLESS app port $new_bridge_local_app_port is already in use on this host"
       fi
       new_bridge_local_bind_addr=$(prompt_local_bind_addr_or_error "$new_bridge_local_bind_addr")
