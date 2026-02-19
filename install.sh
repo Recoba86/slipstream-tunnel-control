@@ -3861,6 +3861,18 @@ cmd_core_switch() {
   set_config_value "SLIPSTREAM_REPO" "$SLIPSTREAM_REPO" "$CONFIG_FILE"
   set_config_value "SLIPSTREAM_VERSION" "$SLIPSTREAM_VERSION" "$CONFIG_FILE"
   set_config_value "SLIPSTREAM_ASSET_LAYOUT" "$SLIPSTREAM_ASSET_LAYOUT" "$CONFIG_FILE"
+
+  if [[ "${MODE:-}" == "client" && -d "$INSTANCES_DIR" ]]; then
+    local icfg
+    for icfg in "$INSTANCES_DIR"/*/config; do
+      [[ -f "$icfg" ]] || continue
+      set_config_value "SLIPSTREAM_CORE" "$SLIPSTREAM_CORE" "$icfg"
+      set_config_value "SLIPSTREAM_REPO" "$SLIPSTREAM_REPO" "$icfg"
+      set_config_value "SLIPSTREAM_VERSION" "$SLIPSTREAM_VERSION" "$icfg"
+      set_config_value "SLIPSTREAM_ASSET_LAYOUT" "$SLIPSTREAM_ASSET_LAYOUT" "$icfg"
+    done
+  fi
+
   log "Core switch completed."
   cmd_status
 }
