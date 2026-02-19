@@ -305,6 +305,14 @@ validate_dnstt_bind_host_or_error() {
   esac
 }
 
+validate_local_bind_addr_or_error() {
+  local bind_addr="$1"
+  case "$bind_addr" in
+  127.0.0.1 | 0.0.0.0) ;;
+  *) error "Invalid local bind address: $bind_addr (use 127.0.0.1 or 0.0.0.0)" ;;
+  esac
+}
+
 prompt_dnstt_bind_host_or_error() {
   local current="${1:-127.0.0.1}" input
   validate_dnstt_bind_host_or_error "$current"
@@ -318,6 +326,24 @@ prompt_dnstt_bind_host_or_error() {
       ;;
     *)
       warn "Invalid bind host: $input"
+      ;;
+    esac
+  done
+}
+
+prompt_local_bind_addr_or_error() {
+  local current="${1:-0.0.0.0}" input
+  validate_local_bind_addr_or_error "$current"
+  while true; do
+    read -r -p "Local app bind address [127.0.0.1/0.0.0.0] [$current]: " input
+    [[ -z "$input" ]] && input="$current"
+    case "$input" in
+    127.0.0.1 | 0.0.0.0)
+      echo "$input"
+      return 0
+      ;;
+    *)
+      warn "Invalid bind address: $input"
       ;;
     esac
   done
@@ -599,6 +625,16 @@ instance_health_log() {
 instance_client_service() {
   local name="$1"
   echo "slipstream-client-$name"
+}
+
+instance_ssh_client_service() {
+  local name="$1"
+  echo "slipstream-ssh-client-$name"
+}
+
+instance_ssh_client_env_file() {
+  local name="$1"
+  echo "$SSH_CLIENT_ENV_DIR/ssh-client-$name.env"
 }
 
 instance_health_service() {
@@ -1670,6 +1706,99 @@ WantedBy=multi-user.target
 EOF
 }
 
+write_instance_ssh_client_env() {
+  local instance="$1" username="$2" password_b64="$3" transport_port="$4" local_port="$5" remote_app_port="$6" local_bind_addr="$7"
+  validate_instance_name_or_error "$instance"
+  validate_unix_username_or_error "$username"
+  validate_port_or_error "$transport_port"
+  validate_port_or_error "$local_port"
+  validate_port_or_error "$remote_app_port"
+  validate_local_bind_addr_or_error "$local_bind_addr"
+  [[ -n "$password_b64" ]] || error "Missing encoded SSH password for instance '$instance'"
+
+  ensure_service_user
+  mkdir -p "$SSH_CLIENT_ENV_DIR"
+  chown "$SERVICE_USER:$SERVICE_USER" "$SSH_CLIENT_ENV_DIR"
+  chmod 700 "$SSH_CLIENT_ENV_DIR"
+
+  local env_file
+  env_file=$(instance_ssh_client_env_file "$instance")
+  cat >"$env_file" <<EOF
+SSH_TUNNEL_USER=$username
+SSH_TUNNEL_PASS_B64=$password_b64
+SSH_TRANSPORT_PORT=$transport_port
+SSH_LOCAL_PORT=$local_port
+SSH_REMOTE_APP_PORT=$remote_app_port
+SSH_LOCAL_BIND_ADDR=$local_bind_addr
+EOF
+  chown "$SERVICE_USER:$SERVICE_USER" "$env_file"
+  chmod 600 "$env_file"
+  touch "$SSH_CLIENT_ENV_DIR/known_hosts"
+  chown "$SERVICE_USER:$SERVICE_USER" "$SSH_CLIENT_ENV_DIR/known_hosts"
+  chmod 600 "$SSH_CLIENT_ENV_DIR/known_hosts"
+}
+
+write_instance_ssh_client_service() {
+  local instance="$1"
+  validate_instance_name_or_error "$instance"
+  ensure_service_user
+  local ssh_service env_file base_service
+  ssh_service=$(instance_ssh_client_service "$instance")
+  env_file=$(instance_ssh_client_env_file "$instance")
+  base_service=$(instance_client_service "$instance")
+
+  cat >"/etc/systemd/system/${ssh_service}.service" <<EOF
+[Unit]
+Description=Slipstream SSH App Bridge Client (${instance})
+After=network.target ${base_service}.service
+Requires=${base_service}.service
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+EnvironmentFile=$env_file
+ExecStart=/bin/bash -lc 'raw="\$SSH_TUNNEL_PASS_B64"; cleaned="\$(printf "%%s" "\$raw" | tr -d " \t\r\n")"; pass="\$(printf "%%s" "\$cleaned" | base64 -d 2>/dev/null || true)"; [[ -n "\$pass" ]] || pass="\$raw"; SSHPASS="\$pass" exec sshpass -e ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$SSH_CLIENT_ENV_DIR/known_hosts -L \${SSH_LOCAL_BIND_ADDR}:\${SSH_LOCAL_PORT}:127.0.0.1:\${SSH_REMOTE_APP_PORT} -p \${SSH_TRANSPORT_PORT} \${SSH_TUNNEL_USER}@127.0.0.1'
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$SSH_CLIENT_ENV_DIR
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+remove_instance_ssh_client_service_if_present() {
+  local instance="$1"
+  validate_instance_name_or_error "$instance"
+  local ssh_service env_file
+  ssh_service=$(instance_ssh_client_service "$instance")
+  env_file=$(instance_ssh_client_env_file "$instance")
+  if [[ -f "/etc/systemd/system/${ssh_service}.service" ]]; then
+    systemctl stop "$ssh_service" 2>/dev/null || true
+    systemctl disable "$ssh_service" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${ssh_service}.service"
+  fi
+  rm -f "$env_file"
+  systemctl reset-failed "$ssh_service" 2>/dev/null || true
+}
+
+instance_ssh_bridge_enabled_from_file() {
+  local instance="$1"
+  local cfg value
+  cfg=$(instance_config_file "$instance")
+  value=$(config_value_from_file "$cfg" "DNSTT_SSH_BRIDGE_ENABLED" || true)
+  [[ "$value" == "true" ]]
+}
+
 remove_ssh_client_service_if_present() {
   if [[ -f /etc/systemd/system/${SSH_CLIENT_SERVICE}.service ]]; then
     systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
@@ -2302,6 +2431,20 @@ client_transport_port_from_config() {
   fi
 }
 
+default_instance_ssh_bridge_port() {
+  local transport_port="$1"
+  validate_port_or_error "$transport_port"
+  local candidate=$((transport_port + 10000))
+  if ((candidate > 65535)); then
+    candidate=$((transport_port + 1000))
+  fi
+  if ((candidate > 65535)); then
+    candidate=$((transport_port + 100))
+  fi
+  ((candidate <= 65535)) || candidate="$transport_port"
+  echo "$candidate"
+}
+
 find_best_server() {
   local domain="$1" file="$2"
   local best_server="" best_latency=9999
@@ -2920,6 +3063,8 @@ client_recover_reason() {
   local lookback="${1:-6 minutes ago}"
   local listen_port="${2:-${PORT:-7000}}"
   local service_name="${3:-slipstream-client}"
+  local bridge_service_name="${4:-}"
+  local bridge_listen_port="${5:-}"
 
   if ! systemctl is-active --quiet "$service_name"; then
     echo "$service_name service not active"
@@ -2928,6 +3073,18 @@ client_recover_reason() {
   if ! ss -lntH "sport = :$listen_port" 2>/dev/null | grep -q .; then
     echo "client listen port $listen_port is not open"
     return 0
+  fi
+  if [[ -n "$bridge_service_name" ]]; then
+    if ! systemctl is-active --quiet "$bridge_service_name"; then
+      echo "$bridge_service_name service not active"
+      return 0
+    fi
+  fi
+  if [[ -n "$bridge_listen_port" ]]; then
+    if ! ss -lntH "sport = :$bridge_listen_port" 2>/dev/null | grep -q .; then
+      echo "bridge listen port $bridge_listen_port is not open"
+      return 0
+    fi
   fi
   if journalctl -u "$service_name" --since "$lookback" --no-pager -l | grep -Eq \
     'WATCHDOG: main loop stalled|ERROR connection flow blocked'; then
@@ -3224,34 +3381,49 @@ setup_instance_timers() {
 
 start_instance_stack() {
   local instance="$1"
-  local service_name health_timer watchdog_timer
+  local service_name health_timer watchdog_timer ssh_service
   service_name=$(instance_client_service "$instance")
   health_timer=$(instance_health_timer "$instance")
   watchdog_timer=$(instance_watchdog_timer "$instance")
   systemctl enable "$service_name"
   start_named_client_stack "$service_name"
+  if instance_ssh_bridge_enabled_from_file "$instance"; then
+    ssh_service=$(instance_ssh_client_service "$instance")
+    if systemctl cat "${ssh_service}.service" >/dev/null 2>&1; then
+      systemctl enable "$ssh_service" >/dev/null 2>&1 || true
+      systemctl start "$ssh_service" || true
+    fi
+  fi
   systemctl start "$health_timer" || true
   systemctl start "$watchdog_timer" || true
 }
 
 stop_instance_stack() {
   local instance="$1"
-  local service_name health_timer watchdog_timer
+  local service_name health_timer watchdog_timer ssh_service
   service_name=$(instance_client_service "$instance")
   health_timer=$(instance_health_timer "$instance")
   watchdog_timer=$(instance_watchdog_timer "$instance")
   systemctl stop "$watchdog_timer" 2>/dev/null || true
   systemctl stop "$health_timer" 2>/dev/null || true
+  ssh_service=$(instance_ssh_client_service "$instance")
+  systemctl stop "$ssh_service" 2>/dev/null || true
   stop_named_client_stack "$service_name" 2>/dev/null || true
 }
 
 restart_instance_stack() {
   local instance="$1"
-  local service_name health_timer watchdog_timer
+  local service_name health_timer watchdog_timer ssh_service
   service_name=$(instance_client_service "$instance")
   health_timer=$(instance_health_timer "$instance")
   watchdog_timer=$(instance_watchdog_timer "$instance")
   restart_named_client_stack "$service_name"
+  if instance_ssh_bridge_enabled_from_file "$instance"; then
+    ssh_service=$(instance_ssh_client_service "$instance")
+    if systemctl cat "${ssh_service}.service" >/dev/null 2>&1; then
+      systemctl restart "$ssh_service" || true
+    fi
+  fi
   systemctl start "$health_timer" || true
   systemctl start "$watchdog_timer" || true
 }
@@ -3266,6 +3438,8 @@ cmd_instance_add() {
 
   local instance="${1:-}" domain="" port="7001" resolver="" input
   local transport="slipstream" dnstt_pubkey="" slipstream_cert="" dnstt_client_path="" dnstt_bind_host="127.0.0.1"
+  local dnstt_ssh_bridge_enabled="false" dnstt_ssh_user="" dnstt_ssh_pass="" dnstt_ssh_pass_b64=""
+  local dnstt_ssh_remote_app_port="2053" dnstt_ssh_local_app_port="" dnstt_ssh_local_bind_addr="0.0.0.0"
   if [[ -z "$instance" ]]; then
     read -r -p "Instance name (e.g., dubai): " instance
   fi
@@ -3307,6 +3481,29 @@ cmd_instance_add() {
   if port_in_use "$port"; then
     error "Port $port is already in use on this host"
   fi
+  if [[ "$transport" == "dnstt" ]]; then
+    read -r -p "Enable SSH app bridge over DNSTT for VLESS links? [y/N]: " input
+    if [[ "${input:-n}" == "y" ]]; then
+      dnstt_ssh_bridge_enabled="true"
+      check_dependencies ssh sshpass base64
+      read -r -p "SSH username: " dnstt_ssh_user
+      validate_unix_username_or_error "$dnstt_ssh_user"
+      dnstt_ssh_pass=$(prompt_password_twice "SSH password for ${dnstt_ssh_user}")
+      read -r -p "Remote protected app port [2053]: " input
+      [[ -n "$input" ]] && dnstt_ssh_remote_app_port="$input"
+      validate_port_or_error "$dnstt_ssh_remote_app_port"
+      dnstt_ssh_local_app_port=$(default_instance_ssh_bridge_port "$port")
+      read -r -p "Local VLESS app port [${dnstt_ssh_local_app_port}]: " input
+      [[ -n "$input" ]] && dnstt_ssh_local_app_port="$input"
+      validate_port_or_error "$dnstt_ssh_local_app_port"
+      [[ "$dnstt_ssh_local_app_port" != "$port" ]] || error "Local VLESS app port must differ from DNSTT transport port"
+      if port_in_use "$dnstt_ssh_local_app_port"; then
+        error "Local VLESS app port $dnstt_ssh_local_app_port is already in use on this host"
+      fi
+      dnstt_ssh_local_bind_addr=$(prompt_local_bind_addr_or_error "$dnstt_ssh_local_bind_addr")
+      dnstt_ssh_pass_b64=$(printf '%s' "$dnstt_ssh_pass" | base64 | tr -d '\n')
+    fi
+  fi
   prompt_instance_resolver_or_error resolver "$domain"
 
   mkdir -p "$instance_path"
@@ -3322,6 +3519,12 @@ PORT=$port
 DNSTM_TRANSPORT=$transport
 DNSTM_DNSTT_PUBKEY=$dnstt_pubkey
 DNSTT_BIND_HOST=$dnstt_bind_host
+DNSTT_SSH_BRIDGE_ENABLED=$dnstt_ssh_bridge_enabled
+DNSTT_SSH_USER=$dnstt_ssh_user
+DNSTT_SSH_PASS_B64=$dnstt_ssh_pass_b64
+DNSTT_SSH_REMOTE_APP_PORT=$dnstt_ssh_remote_app_port
+DNSTT_SSH_LOCAL_APP_PORT=$dnstt_ssh_local_app_port
+DNSTT_SSH_LOCAL_BIND_ADDR=$dnstt_ssh_local_bind_addr
 DNSTM_SLIPSTREAM_CERT=$slipstream_cert
 SLIPSTREAM_CORE=$SLIPSTREAM_CORE
 SLIPSTREAM_REPO=$SLIPSTREAM_REPO
@@ -3341,8 +3544,17 @@ SSH_REMOTE_APP_PORT=
 SSH_TRANSPORT_PORT=
 EOF
   warn "Instance '$instance' uses transport '$transport' (SSH auth overlay disabled)."
+  if [[ "$dnstt_ssh_bridge_enabled" == "true" ]]; then
+    log "DNSTT SSH app bridge enabled: ${dnstt_ssh_local_bind_addr}:${dnstt_ssh_local_app_port} -> 127.0.0.1:${dnstt_ssh_remote_app_port} (user: ${dnstt_ssh_user})"
+  fi
 
   write_instance_client_service "$instance" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey" "$dnstt_bind_host"
+  if [[ "$dnstt_ssh_bridge_enabled" == "true" ]]; then
+    write_instance_ssh_client_env "$instance" "$dnstt_ssh_user" "$dnstt_ssh_pass_b64" "$port" "$dnstt_ssh_local_app_port" "$dnstt_ssh_remote_app_port" "$dnstt_ssh_local_bind_addr"
+    write_instance_ssh_client_service "$instance"
+  else
+    remove_instance_ssh_client_service_if_present "$instance"
+  fi
   setup_instance_timers "$instance"
   systemctl daemon-reload
   start_instance_stack "$instance"
@@ -3359,7 +3571,7 @@ cmd_instance_list() {
   fi
 
   local any=false
-  local cfg instance status port resolver transport
+  local cfg instance status port resolver transport app_port
   echo "=== Client Instances ==="
   for cfg in "$INSTANCES_DIR"/*/config; do
     [[ -f "$cfg" ]] || continue
@@ -3371,7 +3583,12 @@ cmd_instance_list() {
     port="${PORT:-unknown}"
     resolver="${CURRENT_SERVER:-unknown}"
     transport="${DNSTM_TRANSPORT:-slipstream}"
-    printf "  %-16s service=%-10s port=%-6s resolver=%-15s transport=%s\n" "$instance" "$status" "$port" "$resolver" "$transport"
+    app_port="${DNSTT_SSH_LOCAL_APP_PORT:-}"
+    if [[ "${DNSTT_SSH_BRIDGE_ENABLED:-false}" == "true" && -n "$app_port" ]]; then
+      printf "  %-16s service=%-10s port=%-6s app=%-6s resolver=%-15s transport=%s\n" "$instance" "$status" "$port" "$app_port" "$resolver" "$transport"
+    else
+      printf "  %-16s service=%-10s port=%-6s resolver=%-15s transport=%s\n" "$instance" "$status" "$port" "$resolver" "$transport"
+    fi
   done
   if [[ "$any" == false ]]; then
     echo "No extra client instances configured."
@@ -3406,6 +3623,15 @@ cmd_instance_status() {
   echo "Service: $(service_state "$service_name")"
   echo "Health timer: $(service_state "$health_timer")"
   echo "Runtime watchdog: $(service_state "$watchdog_timer")"
+  if [[ "${DNSTT_SSH_BRIDGE_ENABLED:-false}" == "true" ]]; then
+    local ssh_service
+    ssh_service=$(instance_ssh_client_service "$instance")
+    echo "SSH app bridge: enabled"
+    echo "  Bridge service: $(service_state "$ssh_service")"
+    echo "  Local app endpoint: ${DNSTT_SSH_LOCAL_BIND_ADDR:-0.0.0.0}:${DNSTT_SSH_LOCAL_APP_PORT:-unknown}"
+    echo "  Remote app via SSH: 127.0.0.1:${DNSTT_SSH_REMOTE_APP_PORT:-2053}"
+    [[ -n "${DNSTT_SSH_USER:-}" ]] && echo "  SSH user: ${DNSTT_SSH_USER}"
+  fi
   if [[ -f "$health_log" ]]; then
     echo ""
     echo "Recent health events:"
@@ -3634,6 +3860,7 @@ cmd_instance_edit() {
 
   local cfg servers_file old_port new_domain new_port new_server
   local new_transport new_dnstt_pubkey new_slipstream_cert new_dnstt_bind_host
+  local new_bridge_enabled new_bridge_user new_bridge_pass_b64 new_bridge_remote_app_port new_bridge_local_app_port new_bridge_local_bind_addr
   cfg=$(instance_config_file "$instance")
   servers_file=$(instance_servers_file "$instance")
   old_port="${PORT:-7001}"
@@ -3643,6 +3870,12 @@ cmd_instance_edit() {
   new_transport="${DNSTM_TRANSPORT:-slipstream}"
   new_dnstt_pubkey="${DNSTM_DNSTT_PUBKEY:-}"
   new_dnstt_bind_host="${DNSTT_BIND_HOST:-127.0.0.1}"
+  new_bridge_enabled="${DNSTT_SSH_BRIDGE_ENABLED:-false}"
+  new_bridge_user="${DNSTT_SSH_USER:-}"
+  new_bridge_pass_b64="${DNSTT_SSH_PASS_B64:-}"
+  new_bridge_remote_app_port="${DNSTT_SSH_REMOTE_APP_PORT:-2053}"
+  new_bridge_local_app_port="${DNSTT_SSH_LOCAL_APP_PORT:-}"
+  new_bridge_local_bind_addr="${DNSTT_SSH_LOCAL_BIND_ADDR:-0.0.0.0}"
   new_slipstream_cert="${DNSTM_SLIPSTREAM_CERT:-}"
 
   echo "=== Edit Client Instance: $instance ==="
@@ -3677,6 +3910,41 @@ cmd_instance_edit() {
     [[ -n "$input" ]] && new_dnstt_pubkey="$input"
     validate_dnstt_pubkey_or_error "$new_dnstt_pubkey"
     new_dnstt_bind_host=$(prompt_dnstt_bind_host_or_error "$new_dnstt_bind_host")
+    read -r -p "Enable SSH app bridge over DNSTT? [y/N] (current: ${new_bridge_enabled}): " input
+    if [[ -n "$input" ]]; then
+      [[ "$input" == "y" ]] && new_bridge_enabled="true" || new_bridge_enabled="false"
+    fi
+    if [[ "$new_bridge_enabled" == "true" ]]; then
+      check_dependencies ssh sshpass base64
+      read -r -p "SSH username [$new_bridge_user]: " input
+      [[ -n "$input" ]] && new_bridge_user="$input"
+      validate_unix_username_or_error "$new_bridge_user"
+      read -r -p "Remote protected app port [$new_bridge_remote_app_port]: " input
+      [[ -n "$input" ]] && new_bridge_remote_app_port="$input"
+      validate_port_or_error "$new_bridge_remote_app_port"
+      [[ -n "$new_bridge_local_app_port" ]] || new_bridge_local_app_port=$(default_instance_ssh_bridge_port "$new_port")
+      read -r -p "Local VLESS app port [$new_bridge_local_app_port]: " input
+      [[ -n "$input" ]] && new_bridge_local_app_port="$input"
+      validate_port_or_error "$new_bridge_local_app_port"
+      [[ "$new_bridge_local_app_port" != "$new_port" ]] || error "Local VLESS app port must differ from DNSTT transport port"
+      if [[ "$new_bridge_local_app_port" != "${DNSTT_SSH_LOCAL_APP_PORT:-}" ]] && port_in_use "$new_bridge_local_app_port"; then
+        error "Local VLESS app port $new_bridge_local_app_port is already in use on this host"
+      fi
+      new_bridge_local_bind_addr=$(prompt_local_bind_addr_or_error "$new_bridge_local_bind_addr")
+      read -r -p "Change SSH password now? [y/N]: " input
+      if [[ "$input" == "y" || -z "$new_bridge_pass_b64" ]]; then
+        local plain_pass
+        plain_pass=$(prompt_password_twice "SSH password for ${new_bridge_user}")
+        new_bridge_pass_b64=$(printf '%s' "$plain_pass" | base64 | tr -d '\n')
+      fi
+      [[ -n "$new_bridge_pass_b64" ]] || error "SSH password is required when SSH app bridge is enabled"
+    else
+      new_bridge_user=""
+      new_bridge_pass_b64=""
+      new_bridge_remote_app_port="2053"
+      new_bridge_local_app_port=""
+      new_bridge_local_bind_addr="0.0.0.0"
+    fi
     new_slipstream_cert=""
     ensure_instance_client_binary "$new_transport"
   else
@@ -3687,6 +3955,12 @@ cmd_instance_edit() {
     [[ -z "$new_slipstream_cert" || -f "$new_slipstream_cert" ]] || error "Slipstream cert file not found: $new_slipstream_cert"
     new_dnstt_pubkey=""
     new_dnstt_bind_host=""
+    new_bridge_enabled="false"
+    new_bridge_user=""
+    new_bridge_pass_b64=""
+    new_bridge_remote_app_port="2053"
+    new_bridge_local_app_port=""
+    new_bridge_local_bind_addr="0.0.0.0"
     ensure_instance_client_binary "$new_transport"
   fi
 
@@ -3700,12 +3974,24 @@ cmd_instance_edit() {
   set_config_value "DNSTM_TRANSPORT" "$new_transport" "$cfg"
   set_config_value "DNSTM_DNSTT_PUBKEY" "$new_dnstt_pubkey" "$cfg"
   set_config_value "DNSTT_BIND_HOST" "$new_dnstt_bind_host" "$cfg"
+  set_config_value "DNSTT_SSH_BRIDGE_ENABLED" "$new_bridge_enabled" "$cfg"
+  set_config_value "DNSTT_SSH_USER" "$new_bridge_user" "$cfg"
+  set_config_value "DNSTT_SSH_PASS_B64" "$new_bridge_pass_b64" "$cfg"
+  set_config_value "DNSTT_SSH_REMOTE_APP_PORT" "$new_bridge_remote_app_port" "$cfg"
+  set_config_value "DNSTT_SSH_LOCAL_APP_PORT" "$new_bridge_local_app_port" "$cfg"
+  set_config_value "DNSTT_SSH_LOCAL_BIND_ADDR" "$new_bridge_local_bind_addr" "$cfg"
   set_config_value "DNSTM_SLIPSTREAM_CERT" "$new_slipstream_cert" "$cfg"
   if [[ "${SCAN_SOURCE:-file}" == "file" ]]; then
     set_config_value "SCAN_DNS_FILE" "$servers_file" "$cfg"
   fi
 
   write_instance_client_service "$instance" "$new_server" "$new_domain" "$new_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey" "$new_dnstt_bind_host"
+  if [[ "$new_bridge_enabled" == "true" ]]; then
+    write_instance_ssh_client_env "$instance" "$new_bridge_user" "$new_bridge_pass_b64" "$new_port" "$new_bridge_local_app_port" "$new_bridge_remote_app_port" "$new_bridge_local_bind_addr"
+    write_instance_ssh_client_service "$instance"
+  else
+    remove_instance_ssh_client_service_if_present "$instance"
+  fi
   setup_instance_timers "$instance"
   systemctl daemon-reload
   restart_instance_stack "$instance"
@@ -3723,7 +4009,10 @@ cmd_instance_del() {
   load_instance_config_or_error "$instance"
 
   local service_name health_service health_timer watchdog_service watchdog_timer instance_path
+  local ssh_service ssh_env_file
   service_name=$(instance_client_service "$instance")
+  ssh_service=$(instance_ssh_client_service "$instance")
+  ssh_env_file=$(instance_ssh_client_env_file "$instance")
   health_service=$(instance_health_service "$instance")
   health_timer=$(instance_health_timer "$instance")
   watchdog_service=$(instance_watchdog_service "$instance")
@@ -3732,9 +4021,12 @@ cmd_instance_del() {
 
   stop_instance_stack "$instance"
   systemctl disable "$service_name" 2>/dev/null || true
+  systemctl disable "$ssh_service" 2>/dev/null || true
   systemctl disable "$health_timer" 2>/dev/null || true
   systemctl disable "$watchdog_timer" 2>/dev/null || true
   rm -f "/etc/systemd/system/${service_name}.service"
+  rm -f "/etc/systemd/system/${ssh_service}.service"
+  rm -f "$ssh_env_file"
   rm -f "/etc/systemd/system/${health_service}.service"
   rm -f "/etc/systemd/system/${health_timer}"
   rm -f "/etc/systemd/system/${watchdog_service}.service"
@@ -3752,11 +4044,17 @@ cmd_instance_health() {
   validate_instance_name_or_error "$instance"
   load_instance_config_or_error "$instance"
 
-  local cfg servers_file health_log service_name
+  local cfg servers_file health_log service_name bridge_service bridge_port
   cfg=$(instance_config_file "$instance")
   servers_file=$(instance_servers_file "$instance")
   health_log=$(instance_health_log "$instance")
   service_name=$(instance_client_service "$instance")
+  bridge_service=""
+  bridge_port=""
+  if [[ "${DNSTT_SSH_BRIDGE_ENABLED:-false}" == "true" ]]; then
+    bridge_service=$(instance_ssh_client_service "$instance")
+    bridge_port="${DNSTT_SSH_LOCAL_APP_PORT:-}"
+  fi
   [[ "${MODE:-}" == "client" ]] || error "Instance '$instance' is not in client mode"
 
   local timestamp
@@ -3768,9 +4066,9 @@ cmd_instance_health() {
   [[ -n "$current_domain" ]] || error "Instance '$instance' has no DOMAIN in config"
 
   local recover_reason=""
-  if recover_reason=$(client_recover_reason "6 minutes ago" "$current_port" "$service_name"); then
+  if recover_reason=$(client_recover_reason "6 minutes ago" "$current_port" "$service_name" "$bridge_service" "$bridge_port"); then
     echo "[$timestamp] Self-heal triggered: $recover_reason" >>"$health_log"
-    if restart_named_client_stack "$service_name"; then
+    if restart_instance_stack "$instance"; then
       echo "[$timestamp] Self-heal restart completed" >>"$health_log"
       sleep 2
     else
@@ -3789,7 +4087,7 @@ cmd_instance_health() {
         set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
         write_instance_client_service "$instance" "$best_server" "$current_domain" "$current_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}"
         systemctl daemon-reload
-        if restart_named_client_stack "$service_name"; then
+        if restart_instance_stack "$instance"; then
           echo "[$timestamp] Switched to $best_server (${best_latency}ms)" >>"$health_log"
         else
           echo "[$timestamp] ERROR: switch restart failed" >>"$health_log"
@@ -3817,10 +4115,16 @@ cmd_instance_watchdog() {
   validate_instance_name_or_error "$instance"
   load_instance_config_or_error "$instance"
 
-  local service_name reason="" now last=0 state_file health_log
+  local service_name bridge_service bridge_port reason="" now last=0 state_file health_log
   service_name=$(instance_client_service "$instance")
+  bridge_service=""
+  bridge_port=""
+  if [[ "${DNSTT_SSH_BRIDGE_ENABLED:-false}" == "true" ]]; then
+    bridge_service=$(instance_ssh_client_service "$instance")
+    bridge_port="${DNSTT_SSH_LOCAL_APP_PORT:-}"
+  fi
   health_log=$(instance_health_log "$instance")
-  if ! reason=$(client_recover_reason "90 seconds ago" "${PORT:-7000}" "$service_name"); then
+  if ! reason=$(client_recover_reason "90 seconds ago" "${PORT:-7000}" "$service_name" "$bridge_service" "$bridge_port"); then
     exit 0
   fi
 
@@ -3839,7 +4143,7 @@ cmd_instance_watchdog() {
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   echo "[$timestamp] Watchdog restart triggered: $reason" >>"$health_log"
-  if restart_named_client_stack "$service_name"; then
+  if restart_instance_stack "$instance"; then
     echo "[$timestamp] Watchdog restart completed" >>"$health_log"
   else
     echo "[$timestamp] ERROR: watchdog restart failed" >>"$health_log"
