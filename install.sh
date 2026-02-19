@@ -1008,6 +1008,19 @@ dnstm_validate_backend_type_or_error() {
   esac
 }
 
+dnstm_warn_custom_backend_listener() {
+  local app_port="$1"
+  if ! command -v ss >/dev/null 2>&1; then
+    return 0
+  fi
+  if ss -lntH "sport = :$app_port" 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  warn "DNSTM custom backend is set to 127.0.0.1:${app_port}, but no local TCP listener is detected on that port."
+  warn "Tunnel traffic will fail with 'target connect failed / Connection refused' until your app listens on ${app_port}."
+  warn "If Xray uses another port (example: 2052), run 'slipstream-tunnel edit' in server mode and set the correct protected app port."
+}
+
 dnstm_setup_server_stack() {
   local domain="$1"
   local app_port="$2"
@@ -1056,6 +1069,9 @@ dnstm_setup_server_stack() {
     run_dnstm router switch -t "$tunnel_tag" >/dev/null 2>&1 || true
   fi
   run_dnstm router start >/dev/null 2>&1 || true
+  if [[ "$backend_type" == "custom" ]]; then
+    dnstm_warn_custom_backend_listener "$app_port"
+  fi
 }
 
 should_auto_fallback_to_plus_for_arm() {
@@ -3065,6 +3081,8 @@ client_recover_reason() {
   local service_name="${3:-slipstream-client}"
   local bridge_service_name="${4:-}"
   local bridge_listen_port="${5:-}"
+  local expected_resolver="${6:-${CURRENT_SERVER:-}}"
+  local recent_log="" closed_pipe_hits=0
 
   if ! systemctl is-active --quiet "$service_name"; then
     echo "$service_name service not active"
@@ -3086,9 +3104,21 @@ client_recover_reason() {
       return 0
     fi
   fi
-  if journalctl -u "$service_name" --since "$lookback" --no-pager -l | grep -Eq \
-    'WATCHDOG: main loop stalled|ERROR connection flow blocked'; then
+  if [[ -n "$expected_resolver" ]]; then
+    if ! systemctl cat "$service_name" 2>/dev/null | awk '/^ExecStart=/{print; exit}' | grep -Eq -- "(-udp|--resolver) ${expected_resolver}:53([[:space:]]|$)"; then
+      echo "service resolver does not match CURRENT_SERVER ($expected_resolver)"
+      return 0
+    fi
+  fi
+
+  recent_log=$(journalctl -u "$service_name" --since "$lookback" --no-pager -l 2>/dev/null || true)
+  if printf '%s\n' "$recent_log" | grep -Eq 'WATCHDOG: main loop stalled|ERROR connection flow blocked'; then
     echo "recent watchdog/flow-blocked runtime errors detected"
+    return 0
+  fi
+  closed_pipe_hits=$(printf '%s\n' "$recent_log" | grep -c 'io: read/write on closed pipe' || true)
+  if [[ "$closed_pipe_hits" =~ ^[0-9]+$ ]] && ((closed_pipe_hits >= 3)); then
+    echo "recent DNSTT stream-open failures detected (closed pipe)"
     return 0
   fi
   return 1
@@ -3124,6 +3154,12 @@ cmd_watchdog() {
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   echo "[$timestamp] Watchdog restart triggered: $reason" >>"$HEALTH_LOG"
+  if [[ -n "${CURRENT_SERVER:-}" && -n "${DOMAIN:-}" ]]; then
+    local transport_port
+    transport_port=$(client_transport_port_from_config)
+    write_client_service "$CURRENT_SERVER" "$DOMAIN" "$transport_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
+    systemctl daemon-reload
+  fi
   if restart_client_stack; then
     echo "[$timestamp] Watchdog restart completed" >>"$HEALTH_LOG"
   else
@@ -3153,6 +3189,12 @@ cmd_health() {
   if recover_reason=$(client_recover_reason "6 minutes ago" "$PORT"); then
     echo "Self-heal: $recover_reason"
     echo "[$timestamp] Self-heal triggered: $recover_reason" >>"$HEALTH_LOG"
+    if [[ -n "${CURRENT_SERVER:-}" && -n "${DOMAIN:-}" ]]; then
+      local transport_port
+      transport_port=$(client_transport_port_from_config)
+      write_client_service "$CURRENT_SERVER" "$DOMAIN" "$transport_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
+      systemctl daemon-reload
+    fi
     if restart_client_stack; then
       echo "[$timestamp] Self-heal restart completed" >>"$HEALTH_LOG"
       sleep 2
@@ -3771,7 +3813,7 @@ cmd_instance_select_server() {
 
   local selected="${servers[$((choice - 1))]}"
   set_config_value "CURRENT_SERVER" "$selected" "$cfg"
-  write_instance_client_service "$instance" "$selected" "$DOMAIN" "$PORT"
+  write_instance_client_service "$instance" "$selected" "$DOMAIN" "$PORT" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
   systemctl daemon-reload
   restart_instance_stack "$instance"
   log "Instance '$instance' switched to DNS server: $selected"
@@ -3842,7 +3884,7 @@ cmd_instance_rescan() {
   [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan for '$instance'"
 
   set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
-  write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT" "$transport"
+  write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT" "$transport" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
   systemctl daemon-reload
   restart_instance_stack "$instance"
   log "Instance '$instance' switched to best DNS server: $best_server (${best_latency}ms)"
@@ -4068,6 +4110,8 @@ cmd_instance_health() {
   local recover_reason=""
   if recover_reason=$(client_recover_reason "6 minutes ago" "$current_port" "$service_name" "$bridge_service" "$bridge_port"); then
     echo "[$timestamp] Self-heal triggered: $recover_reason" >>"$health_log"
+    write_instance_client_service "$instance" "$current_server" "$current_domain" "$current_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
+    systemctl daemon-reload
     if restart_instance_stack "$instance"; then
       echo "[$timestamp] Self-heal restart completed" >>"$health_log"
       sleep 2
@@ -4085,7 +4129,7 @@ cmd_instance_health() {
       read -r best_server best_latency <<<"$(find_best_server "$current_domain" "$servers_file" || true)"
       if [[ -n "$best_server" && "$best_server" != "$current_server" && "$best_latency" -lt 1000 ]]; then
         set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
-        write_instance_client_service "$instance" "$best_server" "$current_domain" "$current_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}"
+        write_instance_client_service "$instance" "$best_server" "$current_domain" "$current_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
         systemctl daemon-reload
         if restart_instance_stack "$instance"; then
           echo "[$timestamp] Switched to $best_server (${best_latency}ms)" >>"$health_log"
@@ -4124,7 +4168,7 @@ cmd_instance_watchdog() {
     bridge_port="${DNSTT_SSH_LOCAL_APP_PORT:-}"
   fi
   health_log=$(instance_health_log "$instance")
-  if ! reason=$(client_recover_reason "90 seconds ago" "${PORT:-7000}" "$service_name" "$bridge_service" "$bridge_port"); then
+  if ! reason=$(client_recover_reason "90 seconds ago" "${PORT:-7000}" "$service_name" "$bridge_service" "$bridge_port" "${CURRENT_SERVER:-}"); then
     exit 0
   fi
 
@@ -4143,6 +4187,8 @@ cmd_instance_watchdog() {
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   echo "[$timestamp] Watchdog restart triggered: $reason" >>"$health_log"
+  write_instance_client_service "$instance" "${CURRENT_SERVER:-}" "${DOMAIN:-}" "${PORT:-7000}" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
+  systemctl daemon-reload
   if restart_instance_stack "$instance"; then
     echo "[$timestamp] Watchdog restart completed" >>"$health_log"
   else
