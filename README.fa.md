@@ -63,7 +63,10 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 
 از [فورک slipstream-rust](https://github.com/nightowlnerd/slipstream-rust) با رفع باگ‌های مصرف CPU و قطع اتصال استفاده می‌کند. ریپوی اصلی دیگر فعال نیست.
 
-برای تست هسته آزمایشی هم می‌توانید `--core plus` بزنید (دانلود از [Fox-Fig/slipstream-rust-plus-deploy](https://github.com/Fox-Fig/slipstream-rust-plus-deploy)). حالت پیش‌فرض همچنان `nightowl` است.
+هسته‌های قابل استفاده:
+- `dnstm` (پیش‌فرض جدید، دانلود از [net2share/slipstream-rust-build](https://github.com/net2share/slipstream-rust-build))
+- `nightowl` (نسخه پایدار قدیمی)
+- `plus` (سریع‌تر، آزمایشی)
 
 ## دستورات
 
@@ -94,7 +97,7 @@ slipstream-tunnel instance-del <name> # حذف یک کلاینت اضافه
 slipstream-tunnel menu      # منوی مانیتورینگ دستی
 sst                         # دستور کوتاه برای باز کردن منوی مانیتورینگ
 slipstream-tunnel speed-profile [fast|secure|status] # تغییر/نمایش پروفایل سرعت
-slipstream-tunnel core-switch [nightowl|plus] # تعویض هسته بعد از نصب (بدون uninstall)
+slipstream-tunnel core-switch [dnstm|nightowl|plus] # تعویض هسته بعد از نصب (بدون uninstall)
 slipstream-tunnel auth-setup # فعال‌سازی/به‌روزرسانی لایه احراز هویت SSH (سرور)
 slipstream-tunnel auth-disable # غیرفعال‌سازی لایه احراز هویت SSH (سرور)
 slipstream-tunnel auth-client-enable # فعال‌سازی auth SSH در کلاینت
@@ -128,6 +131,8 @@ slipstream-tunnel instance-status finland
 
 نکته: کلاینت‌های اضافه فعلاً در حالت direct slipstream اجرا می‌شوند (SSH auth overlay خاموش است).
 
+نکته: روی هسته `dnstm`، دستورات قدیمی SSH auth overlay غیرفعال هستند و باید از مکانیزم native همان هسته برای auth/backend استفاده شود.
+
 <div dir="rtl">
 
 ## گزینه‌ها
@@ -136,7 +141,7 @@ slipstream-tunnel instance-status finland
 |-------|-------|
 | `--domain` | دامنه تونل (مثلاً t.example.com) |
 | `--port` | سرور: پورت هدف / کلاینت: پورت شنود |
-| `--core` | منبع هسته: `nightowl` (پیش‌فرض) یا `plus` (آزمایشی) |
+| `--core` | منبع هسته: `dnstm` (پیش‌فرض)، `nightowl` یا `plus` |
 | `--dns-file` | لیست سرورهای DNS (بدون اسکن subnet) |
 | `--dnscan` | مسیر فایل dnscan (حالت آفلاین) |
 | `--slipstream` | مسیر باینری slipstream (حالت آفلاین) |
@@ -152,9 +157,22 @@ slipstream-tunnel instance-status finland
 برای A/B تست در برنچ/محیط جدا:
 
 ```bash
-slipstream-tunnel server --core plus --domain t.example.com
-slipstream-tunnel client --core plus --domain t.example.com
+slipstream-tunnel server --core dnstm --domain t.example.com
+slipstream-tunnel client --core dnstm --domain t.example.com
 ```
+
+### مهاجرت سرور/کلاینت قدیمی به هسته پیش‌فرض جدید
+
+اگر از اسکریپت/هسته قبلی استفاده می‌کنید، درجا آپدیت و سوییچ کنید:
+
+```bash
+curl -fL https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh -o /usr/local/bin/slipstream-tunnel
+chmod +x /usr/local/bin/slipstream-tunnel
+hash -r
+slipstream-tunnel core-switch dnstm
+```
+
+این مراحل را هم روی سرور و هم روی کلاینت اجرا کنید.
 
 ### راه‌اندازی سرور
 

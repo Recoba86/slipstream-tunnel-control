@@ -7,7 +7,7 @@ HOME="${HOME:-/root}"
 # =============================================================================
 # Release source configuration (pinned versions)
 # =============================================================================
-SLIPSTREAM_CORE="${SLIPSTREAM_CORE:-nightowl}"
+SLIPSTREAM_CORE="${SLIPSTREAM_CORE:-dnstm}"
 SLIPSTREAM_REPO_OVERRIDE="${SLIPSTREAM_REPO:-}"
 SLIPSTREAM_VERSION_OVERRIDE="${SLIPSTREAM_VERSION:-}"
 SLIPSTREAM_ASSET_LAYOUT_OVERRIDE="${SLIPSTREAM_ASSET_LAYOUT:-}"
@@ -93,7 +93,7 @@ Commands:
   menu                Open interactive monitor menu (server/client)
   m                   Short alias for menu
   speed-profile       Set profile: fast (SSH off) / secure (SSH on)
-  core-switch         Switch current mode to another core (nightowl/plus)
+  core-switch         Switch current mode to another core (dnstm/nightowl/plus)
   auth-setup          Enable/update SSH auth overlay for server mode
   auth-disable        Disable SSH auth overlay for server mode
   auth-client-enable  Enable SSH auth overlay for client mode
@@ -111,7 +111,7 @@ Options:
   --domain <domain>   Tunnel domain (e.g., t.example.com)
   --port <port>       Server: target port (default: 2053)
                       Client: listen port (default: 7000)
-  --core <name>       Slipstream core source: nightowl (default) or plus
+  --core <name>       Slipstream core source: dnstm (default), nightowl, or plus
   --slipstream <path> Path to slipstream binary (offline)
   --dnscan <path>     Path to dnscan tarball (client offline install)
   --dns-file <path>   Custom DNS server list (skips subnet scan)
@@ -140,7 +140,7 @@ Examples:
   slipstream-tunnel instance-select dubai
   slipstream-tunnel menu
   slipstream-tunnel speed-profile fast
-  slipstream-tunnel core-switch plus
+  slipstream-tunnel core-switch dnstm
   slipstream-tunnel auth-add
   sst
 EOF
@@ -165,10 +165,15 @@ detect_os() {
 }
 
 set_slipstream_source() {
-  local core="${1:-nightowl}"
+  local core="${1:-dnstm}"
   local default_repo default_version default_layout
 
   case "$core" in
+  dnstm)
+    default_repo="net2share/slipstream-rust-build"
+    default_version="v2026.02.05"
+    default_layout="binary"
+    ;;
   nightowl)
     default_repo="nightowlnerd/slipstream-rust"
     default_version="v0.1.1"
@@ -180,7 +185,7 @@ set_slipstream_source() {
     default_layout="binary"
     ;;
   *)
-    error "Unknown core '$core'. Valid values: nightowl, plus"
+    error "Unknown core '$core'. Valid values: dnstm, nightowl, plus"
     ;;
   esac
 
@@ -233,25 +238,38 @@ slipstream_asset_name() {
 }
 
 prompt_core_choice() {
-  local current="${1:-nightowl}" input
+  local current="${1:-dnstm}" input
   while true; do
     printf '\n' >&2
     printf 'Select slipstream core:\n' >&2
-    printf '  1) nightowl (stable)\n' >&2
-    printf '  2) plus (faster, experimental)\n' >&2
-    if [[ "$current" == "plus" ]]; then
+    printf '  1) dnstm (default, net2share build)\n' >&2
+    printf '  2) nightowl (stable legacy)\n' >&2
+    printf '  3) plus (faster, experimental)\n' >&2
+    case "$current" in
+    nightowl)
       read -r -p "Choice [2]: " input
       input="${input:-2}"
-    else
+      ;;
+    plus)
+      read -r -p "Choice [3]: " input
+      input="${input:-3}"
+      ;;
+    *)
       read -r -p "Choice [1]: " input
       input="${input:-1}"
-    fi
+      ;;
+    esac
     case "$input" in
-    1 | nightowl) echo "nightowl"; return 0 ;;
-    2 | plus) echo "plus"; return 0 ;;
+    1 | dnstm) echo "dnstm"; return 0 ;;
+    2 | nightowl) echo "nightowl"; return 0 ;;
+    3 | plus) echo "plus"; return 0 ;;
     *) printf '[!] Invalid choice: %s\n' "$input" >&2 ;;
     esac
   done
+}
+
+core_supports_ssh_overlay() {
+  [[ "${SLIPSTREAM_CORE:-}" != "dnstm" ]]
 }
 
 check_dependencies() {
@@ -986,6 +1004,12 @@ load_config_or_error() {
   [[ -f "$CONFIG_FILE" ]] || error "No tunnel configured"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
+
+  # Backward compatibility: old configs may not include core fields.
+  if ! grep -q '^SLIPSTREAM_CORE=' "$CONFIG_FILE" 2>/dev/null; then
+    SLIPSTREAM_CORE="nightowl"
+  fi
+  set_slipstream_source "${SLIPSTREAM_CORE:-dnstm}"
 }
 
 ensure_mode_server_or_error() {
@@ -1492,11 +1516,16 @@ cmd_server() {
   done
 
   if [[ "$core_from_flag" == false && -t 0 ]]; then
-    slipstream_core=$(prompt_core_choice "nightowl")
+    slipstream_core=$(prompt_core_choice "dnstm")
   fi
   set_slipstream_source "$slipstream_core"
+  if [[ "$enable_ssh_auth" == true ]] && ! core_supports_ssh_overlay; then
+    warn "Core '${SLIPSTREAM_CORE}' manages auth natively. Disabling legacy SSH auth overlay flags."
+    enable_ssh_auth=false
+    ssh_backend_port=""
+  fi
   validate_port_or_error "$port"
-  validate_port_or_error "$ssh_backend_port"
+  [[ -n "$ssh_backend_port" ]] && validate_port_or_error "$ssh_backend_port"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
 
   log "=== Slipstream Server Setup ==="
@@ -1730,7 +1759,7 @@ EOF
   echo "  slipstream-tunnel auth-add"
   echo "  slipstream-tunnel auth-disable"
   echo "  slipstream-tunnel speed-profile [fast|secure|status]"
-  echo "  slipstream-tunnel core-switch [nightowl|plus]"
+  echo "  slipstream-tunnel core-switch [dnstm|nightowl|plus]"
   echo "  slipstream-tunnel auth-list"
   echo "  slipstream-tunnel menu"
   echo "  sst"
@@ -1949,9 +1978,17 @@ cmd_client() {
   done
 
   if [[ "$core_from_flag" == false && -t 0 ]]; then
-    slipstream_core=$(prompt_core_choice "nightowl")
+    slipstream_core=$(prompt_core_choice "dnstm")
   fi
   set_slipstream_source "$slipstream_core"
+  if [[ "$ssh_auth_client" == "true" ]] && ! core_supports_ssh_overlay; then
+    warn "Core '${SLIPSTREAM_CORE}' manages auth natively. Disabling legacy SSH auth client overlay flags."
+    ssh_auth_client=false
+    ssh_user=""
+    ssh_pass=""
+    ssh_remote_port=""
+    ssh_transport_port=""
+  fi
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
   [[ -n "$dns_file" ]] && validate_dns_file_or_error "$dns_file"
 
@@ -2290,7 +2327,7 @@ EOF
   echo "  slipstream-tunnel auth-client-disable"
   echo "  slipstream-tunnel auth-client-enable"
   echo "  slipstream-tunnel speed-profile [fast|secure|status]"
-  echo "  slipstream-tunnel core-switch [nightowl|plus]"
+  echo "  slipstream-tunnel core-switch [dnstm|nightowl|plus]"
   echo "  slipstream-tunnel menu"
   echo "  sst"
   echo "  journalctl -u slipstream-client -f"
@@ -2746,7 +2783,7 @@ cmd_instance_status() {
   echo "Domain: ${DOMAIN:-unknown}"
   echo "Port: ${PORT:-unknown}"
   echo "Current DNS: ${CURRENT_SERVER:-unknown}"
-  echo "Core: ${SLIPSTREAM_CORE:-nightowl}"
+  echo "Core: ${SLIPSTREAM_CORE:-dnstm}"
   echo "Service: $(service_state "$service_name")"
   echo "Health timer: $(service_state "$health_timer")"
   echo "Runtime watchdog: $(service_state "$watchdog_timer")"
@@ -3364,9 +3401,16 @@ cmd_edit_client() {
   [[ -n "$input" ]] && new_port="$input"
   read -r -p "DNS resolver IP [$new_server]: " input
   [[ -n "$input" ]] && new_server="$input"
-  read -r -p "Use SSH username/password auth overlay? [y/N] (current: ${new_ssh_auth}): " input
-  if [[ -n "$input" ]]; then
-    [[ "$input" == "y" ]] && new_ssh_auth=true || new_ssh_auth=false
+  if core_supports_ssh_overlay; then
+    read -r -p "Use SSH username/password auth overlay? [y/N] (current: ${new_ssh_auth}): " input
+    if [[ -n "$input" ]]; then
+      [[ "$input" == "y" ]] && new_ssh_auth=true || new_ssh_auth=false
+    fi
+  else
+    if [[ "$new_ssh_auth" == "true" ]]; then
+      warn "Core '${SLIPSTREAM_CORE}' does not use legacy SSH auth overlay. It will be disabled."
+    fi
+    new_ssh_auth=false
   fi
 
   validate_domain_or_error "$new_domain"
@@ -3466,12 +3510,18 @@ cmd_edit_server() {
   local ssh_backend_port="${SSH_BACKEND_PORT:-22}"
   local input regenerate_cert=false
 
+  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && ! core_supports_ssh_overlay; then
+    warn "Core '${SLIPSTREAM_CORE}' does not use legacy SSH auth overlay. Existing overlay settings will be cleared."
+    SSH_AUTH_ENABLED="false"
+    SSH_BACKEND_PORT=""
+  fi
+
   echo "=== Edit Server Settings ==="
   read -r -p "Domain [$new_domain]: " input
   [[ -n "$input" ]] && new_domain="$input"
   read -r -p "Protected app port [$new_port]: " input
   [[ -n "$input" ]] && new_port="$input"
-  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && core_supports_ssh_overlay; then
     read -r -p "SSH backend port for slipstream [$ssh_backend_port]: " input
     [[ -n "$input" ]] && ssh_backend_port="$input"
     validate_port_or_error "$ssh_backend_port"
@@ -3488,17 +3538,18 @@ cmd_edit_server() {
   ensure_server_cert "$new_domain" "$regenerate_cert"
   set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
   set_config_value "PORT" "$new_port" "$CONFIG_FILE"
-  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && core_supports_ssh_overlay; then
     set_config_value "SSH_BACKEND_PORT" "$ssh_backend_port" "$CONFIG_FILE"
     write_server_service "$new_domain" "$ssh_backend_port"
   else
+    set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
     set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
     write_server_service "$new_domain" "$new_port"
   fi
   systemctl daemon-reload
   systemctl restart slipstream-server
 
-  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+  if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && core_supports_ssh_overlay; then
     apply_ssh_auth_overlay "$new_port"
   fi
 
@@ -3575,6 +3626,7 @@ cmd_auth_setup() {
   need_root
   check_dependencies systemctl getent awk tr
   ensure_mode_server_or_error
+  core_supports_ssh_overlay || error "Core '${SLIPSTREAM_CORE}' does not use legacy SSH auth overlay. Use native auth/backend features."
 
   local app_port="${PORT:-2053}"
   local ssh_backend_port="${SSH_BACKEND_PORT:-22}"
@@ -3590,6 +3642,11 @@ cmd_auth_disable() {
   check_dependencies systemctl
   ensure_mode_server_or_error
 
+  if ! core_supports_ssh_overlay; then
+    warn "Core '${SLIPSTREAM_CORE}' does not use legacy SSH auth overlay."
+    return 0
+  fi
+
   if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
     warn "SSH auth overlay is already disabled."
     return 0
@@ -3601,6 +3658,7 @@ cmd_client_auth_enable() {
   need_root
   check_dependencies systemctl ssh sshpass base64
   ensure_mode_client_or_error
+  core_supports_ssh_overlay || error "Core '${SLIPSTREAM_CORE}' does not use legacy SSH auth client overlay."
 
   if client_ssh_auth_enabled; then
     log "Client SSH auth overlay is already enabled."
@@ -3662,6 +3720,11 @@ cmd_client_auth_disable() {
   check_dependencies systemctl
   ensure_mode_client_or_error
 
+  if ! core_supports_ssh_overlay; then
+    warn "Core '${SLIPSTREAM_CORE}' does not use legacy SSH auth client overlay."
+    return 0
+  fi
+
   if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
     warn "Client SSH auth overlay is already disabled."
     return 0
@@ -3685,6 +3748,19 @@ cmd_client_auth_disable() {
 cmd_speed_profile() {
   need_root
   load_config_or_error
+
+  if ! core_supports_ssh_overlay; then
+    case "${1:-status}" in
+    status)
+      echo "Speed profile: native (legacy SSH overlay not used on core '${SLIPSTREAM_CORE}')"
+      return 0
+      ;;
+    fast | secure)
+      warn "Speed profiles map to legacy SSH overlay and are not used on core '${SLIPSTREAM_CORE}'."
+      return 0
+      ;;
+    esac
+  fi
 
   local profile="${1:-status}"
   case "$profile" in
@@ -3734,16 +3810,26 @@ cmd_core_switch() {
   check_dependencies curl tar systemctl
   load_config_or_error
 
-  local current_core="${SLIPSTREAM_CORE:-nightowl}"
+  local current_core="${SLIPSTREAM_CORE:-dnstm}"
   local target_core="${1:-}"
   if [[ -z "$target_core" && -t 0 ]]; then
     target_core=$(prompt_core_choice "$current_core")
   fi
-  [[ -n "$target_core" ]] || error "Usage: slipstream-tunnel core-switch <nightowl|plus>"
+  [[ -n "$target_core" ]] || error "Usage: slipstream-tunnel core-switch <dnstm|nightowl|plus>"
 
   if [[ "${current_core}" == "${target_core}" ]]; then
     log "Core is already '${target_core}'."
     return 0
+  fi
+
+  if [[ "$target_core" == "dnstm" && "${SSH_AUTH_ENABLED:-false}" == "true" ]]; then
+    warn "Switching to core 'dnstm': disabling legacy SSH auth overlay first."
+    if [[ "${MODE:-}" == "server" ]]; then
+      server_disable_auth_overlay
+    elif [[ "${MODE:-}" == "client" ]]; then
+      cmd_client_auth_disable
+    fi
+    load_config_or_error
   fi
   set_slipstream_source "$target_core"
 
@@ -4299,7 +4385,7 @@ cmd_menu_client_auth() {
     echo "3) Set speed profile secure (main tunnel)"
     echo "4) Set speed profile fast (main tunnel)"
     echo "5) Show speed profile status (main tunnel)"
-    echo "6) Switch core (nightowl/plus, shared client binary)"
+    echo "6) Switch core (dnstm/nightowl/plus, shared client binary)"
     echo "7) Edit one tunnel settings (main + instances)"
     echo "0) Back"
     read -r -p "Select: " choice
@@ -4389,7 +4475,7 @@ cmd_menu_server_auth() {
     echo "7) Set speed profile secure"
     echo "8) Set speed profile fast"
     echo "9) Show speed profile status"
-    echo "10) Switch core (nightowl/plus)"
+    echo "10) Switch core (dnstm/nightowl/plus)"
     echo "0) Back"
     read -r -p "Select: " choice
 
@@ -4569,11 +4655,15 @@ cmd_status() {
       echo "Core source: ${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION}"
     fi
     [[ -n "${CURRENT_SERVER:-}" ]] && echo "Current DNS: $CURRENT_SERVER"
-    if [[ "${MODE:-}" == "server" ]]; then
-      echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
+    if core_supports_ssh_overlay; then
+      if [[ "${MODE:-}" == "server" ]]; then
+        echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
+      else
+        echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
+        [[ -n "${SSH_AUTH_USER:-}" ]] && echo "SSH user: $SSH_AUTH_USER"
+      fi
     else
-      echo "SSH auth overlay: ${SSH_AUTH_ENABLED:-false}"
-      [[ -n "${SSH_AUTH_USER:-}" ]] && echo "SSH user: $SSH_AUTH_USER"
+      echo "SSH auth overlay: n/a on core ${SLIPSTREAM_CORE}"
     fi
   else
     echo "Not configured"
@@ -4586,7 +4676,7 @@ cmd_status() {
     local status
     status=$(service_state "slipstream-server")
     echo "  slipstream-server: $status"
-    if [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && command -v getent &>/dev/null; then
+    if core_supports_ssh_overlay && [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && command -v getent &>/dev/null; then
       local ssh_users
       ssh_users=$(ssh_group_users | tr '\n' ',' | sed 's/,$//')
       [[ -z "$ssh_users" ]] && ssh_users="none"
@@ -4596,7 +4686,7 @@ cmd_status() {
     local status
     status=$(service_state "slipstream-client")
     echo "  slipstream-client: $status"
-    if client_ssh_auth_enabled; then
+    if core_supports_ssh_overlay && client_ssh_auth_enabled; then
       local ssh_status
       ssh_status=$(service_state "${SSH_CLIENT_SERVICE}")
       echo "  ${SSH_CLIENT_SERVICE}: $ssh_status"

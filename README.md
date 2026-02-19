@@ -51,7 +51,10 @@ slipstream-tunnel client --dnscan ./dnscan.tar.gz --slipstream ./slipstream-clie
 
 Uses a [fork of slipstream-rust](https://github.com/nightowlnerd/slipstream-rust) with fixes for CPU spin and connection stall bugs. The upstream repo is no longer actively maintained.
 
-You can also test an experimental core with `--core plus` (downloads from [Fox-Fig/slipstream-rust-plus-deploy](https://github.com/Fox-Fig/slipstream-rust-plus-deploy)). Default remains `nightowl`.
+Available cores:
+- `dnstm` (default, downloads from [net2share/slipstream-rust-build](https://github.com/net2share/slipstream-rust-build))
+- `nightowl` (stable legacy)
+- `plus` (faster, experimental)
 
 ## Commands
 
@@ -80,7 +83,7 @@ slipstream-tunnel instance-del <name> # Delete one extra instance
 slipstream-tunnel menu      # Interactive monitoring menu (client/server)
 sst                         # Short command for monitor menu
 slipstream-tunnel speed-profile [fast|secure|status] # Toggle/check profile
-slipstream-tunnel core-switch [nightowl|plus] # Switch core in-place after install
+slipstream-tunnel core-switch [dnstm|nightowl|plus] # Switch core in-place after install
 slipstream-tunnel auth-setup # Enable/update SSH auth overlay (server mode)
 slipstream-tunnel auth-disable # Disable SSH auth overlay (server mode)
 slipstream-tunnel auth-client-enable # Enable SSH auth overlay (client mode)
@@ -120,7 +123,7 @@ Note: extra instances currently run in direct slipstream mode (SSH auth overlay 
 | -------------- | ----------------------------------------- |
 | `--domain`     | Tunnel domain (e.g., t.example.com)       |
 | `--port`       | Server: target port / Client: listen port |
-| `--core`       | Core source: `nightowl` (default) or `plus` (experimental) |
+| `--core`       | Core source: `dnstm` (default), `nightowl`, or `plus` |
 | `--dns-file`   | Custom DNS server list (skips subnet scan)|
 | `--dnscan`     | Path to dnscan tarball (offline mode)     |
 | `--slipstream` | Path to slipstream binary (offline mode)  |
@@ -136,9 +139,22 @@ Note: extra instances currently run in direct slipstream mode (SSH auth overlay 
 For A/B testing on a separate branch/environment:
 
 ```bash
-slipstream-tunnel server --core plus --domain t.example.com
-slipstream-tunnel client --core plus --domain t.example.com
+slipstream-tunnel server --core dnstm --domain t.example.com
+slipstream-tunnel client --core dnstm --domain t.example.com
 ```
+
+### Migrating Existing Hosts to New Default Core
+
+If your server/client already has an older script/core installed, update and switch in-place:
+
+```bash
+curl -fL https://raw.githubusercontent.com/Recoba86/slipstream-tunnel-control/main/install.sh -o /usr/local/bin/slipstream-tunnel
+chmod +x /usr/local/bin/slipstream-tunnel
+hash -r
+slipstream-tunnel core-switch dnstm
+```
+
+Run the same on both server and client hosts.
 
 ### Server Setup
 
@@ -181,6 +197,8 @@ slipstream-tunnel client --core plus --domain t.example.com
 - You can toggle overlays later with:
   - Server: `auth-setup` / `auth-disable`
   - Client: `auth-client-enable` / `auth-client-disable`
+
+Note: on core `dnstm`, legacy SSH overlay commands are disabled because auth/backend handling is expected to be managed natively.
 
 ## Speed Profiles
 

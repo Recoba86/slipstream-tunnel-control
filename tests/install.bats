@@ -123,7 +123,17 @@ setup() {
 }
 
 @test "core prompt command substitution returns clean token on Enter default" {
-  run bash -lc "source '$SCRIPT'; out=\$(prompt_core_choice nightowl <<< \$'\\n'); [[ \"\$out\" == 'nightowl' ]]"
+  run bash -lc "source '$SCRIPT'; out=\$(prompt_core_choice dnstm <<< \$'\\n'); [[ \"\$out\" == 'dnstm' ]]"
+  [ "$status" -eq 0 ]
+}
+
+@test "dnstm core source maps to net2share pinned binary release" {
+  run bash -lc "source '$SCRIPT'; set_slipstream_source dnstm; [[ \"\$SLIPSTREAM_REPO\" == 'net2share/slipstream-rust-build' ]] && [[ \"\$SLIPSTREAM_VERSION\" == 'v2026.02.05' ]] && [[ \"\$SLIPSTREAM_ASSET_LAYOUT\" == 'binary' ]]"
+  [ "$status" -eq 0 ]
+}
+
+@test "ssh overlay helper is disabled on dnstm core" {
+  run bash -lc "source '$SCRIPT'; set_slipstream_source dnstm; ! core_supports_ssh_overlay"
   [ "$status" -eq 0 ]
 }
 
