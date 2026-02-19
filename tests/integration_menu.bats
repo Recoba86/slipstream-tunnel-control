@@ -180,6 +180,40 @@ EOF
   [[ "$output" == *"dnscan --domain t.example.com"* ]]
 }
 
+@test "dnstt transport rescan skips dnscan and refreshes resolver candidates" {
+  cat >"${HOME}/.tunnel/config" <<'EOF'
+DOMAIN=t.example.com
+MODE=client
+CURRENT_SERVER=8.8.8.8
+PORT=7000
+DNSTM_TRANSPORT=dnstt
+DNSTM_DNSTT_PUBKEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+SCAN_SOURCE=generated
+SCAN_COUNTRY=ir
+SCAN_MODE=fast
+SCAN_WORKERS=100
+SCAN_TIMEOUT=2s
+SCAN_THRESHOLD=50
+EOF
+
+  cat >"${BATS_TEST_TMPDIR}/run_rescan_dnstt.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+source "$SCRIPT"
+need_root() { :; }
+write_client_service() { echo "$1|$2|$3|$4" >"$HOME/.tunnel/service.args"; }
+cmd_rescan
+grep '^CURRENT_SERVER=' "$HOME/.tunnel/config"
+cat "$HOME/.tunnel/service.args"
+! grep -q '^dnscan ' "$MOCK_LOG"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/run_rescan_dnstt.sh"
+  run bash "${BATS_TEST_TMPDIR}/run_rescan_dnstt.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CURRENT_SERVER="* ]]
+  [[ "$output" == *"|t.example.com|7000|dnstt"* ]]
+}
+
 @test "edit client settings updates domain and port without reinstall" {
   cat >"${BATS_TEST_TMPDIR}/run_edit_client.sh" <<'EOF'
 #!/usr/bin/env bash

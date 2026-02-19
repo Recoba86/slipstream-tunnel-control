@@ -84,6 +84,7 @@ slipstream-tunnel menu      # Interactive monitoring menu (client/server)
 sst                         # Short command for monitor menu
 slipstream-tunnel speed-profile [fast|secure|status] # Toggle/check profile
 slipstream-tunnel core-switch [dnstm|nightowl|plus] # Switch core in-place after install
+slipstream-tunnel dnstm <subcommands...> # Pass-through to native dnstm manager (server+dnstm)
 slipstream-tunnel auth-setup # Enable/update SSH auth overlay (server mode)
 slipstream-tunnel auth-disable # Disable SSH auth overlay (server mode)
 slipstream-tunnel auth-client-enable # Enable SSH auth overlay (client mode)
@@ -97,6 +98,8 @@ slipstream-tunnel remove    # Remove everything
 ```
 
 Inside `menu`, actions are grouped into compact submenus (monitoring, service, auth/profile) for both server and client.
+When server core is `dnstm`, menu includes a native manager submenu for router/tunnel/backend/ssh-users/update actions.
+Client menu also includes a DNSTM submenu for per-tunnel transport/profile management (`slipstream`/`dnstt`).
 
 ## Multi-Instance Client
 
@@ -115,7 +118,7 @@ slipstream-tunnel instance-list
 slipstream-tunnel instance-status finland
 ```
 
-Note: extra instances currently run in direct slipstream mode (SSH auth overlay disabled).
+Note: extra instances support both `slipstream` and `dnstt` transports (SSH auth overlay remains disabled).
 
 ## Options
 
@@ -127,6 +130,18 @@ Note: extra instances currently run in direct slipstream mode (SSH auth overlay 
 | `--dns-file`   | Custom DNS server list (skips subnet scan)|
 | `--dnscan`     | Path to dnscan tarball (offline mode)     |
 | `--slipstream` | Path to slipstream binary (offline mode)  |
+| `--transport`  | Client transport: `slipstream` (default) or `dnstt` (dnstm core) |
+| `--dnstt-pubkey` | Client transport=`dnstt`: DNSTT server public key (64 hex chars) |
+| `--dnstt-client` | Client transport=`dnstt`: path to local `dnstt-client` binary |
+| `--slipstream-cert` | Client transport=`slipstream`: optional pinned cert path |
+| `--dnstm-bin`  | Server: path to local dnstm binary (offline mode) |
+| `--dnstm-transport` | Server (dnstm core): initial transport `slipstream` or `dnstt` |
+| `--dnstm-backend` | Server (dnstm core): initial backend `custom`, `socks`, `ssh`, or `shadowsocks` |
+| `--dnstm-backend-tag` | Server (dnstm core): initial backend tag |
+| `--dnstm-tunnel-tag` | Server (dnstm core): initial tunnel tag |
+| `--dnstm-mode` | Server (dnstm core): native router mode `single` or `multi` |
+| `--dnstm-ss-password` | Server (dnstm core): optional initial Shadowsocks password |
+| `--dnstm-ss-method` | Server (dnstm core): Shadowsocks method (default `aes-256-gcm`) |
 | `--manage-resolver` | Allow server setup to edit resolver config |
 | `--ssh-auth`   | Server: enable SSH username/password auth overlay |
 | `--ssh-backend-port` | Server: SSH daemon port behind slipstream when auth is enabled |
@@ -161,19 +176,18 @@ Run the same on both server and client hosts.
 1. Guides Cloudflare DNS configuration (A + NS records)
 2. Verifies DNS with `dig`
 3. Auto-detects port 53 conflicts and attempts automatic safe remediation
-4. Generates self-signed certificate
-5. Downloads and installs slipstream-server binary
-6. Creates and starts systemd service
-7. Optional: enables SSH auth overlay and creates tunnel users
+4. If core is `dnstm`: installs native `dnstm`, creates initial backend + tunnel, and starts native router
+5. If core is `nightowl/plus`: generates self-signed certificate, installs `slipstream-server`, and starts service
+6. Optional (legacy cores only): enables SSH auth overlay and creates tunnel users
 
 ### Client Setup
 
-1. Downloads dnscan and slipstream binaries (cached for reuse)
-2. Prompts for tunnel listen port (default: 7000)
-3. Prompts for scan settings (country, mode, workers, timeout)
-4. Scans and verifies DNS servers with actual tunnel connection
-5. Picks fastest verified server and starts slipstream-client
-6. Optional: asks SSH username/password and enables client SSH auth overlay
+1. Prompts for transport (`slipstream` or `dnstt`) when core is `dnstm`
+2. Downloads required client binaries (slipstream client and/or dnstt-client), cached for reuse
+3. Prompts for tunnel listen port (default: 7000)
+4. For `slipstream`: runs dnscan verification flow; for `dnstt`: builds reachable resolver candidates
+5. Picks fastest resolver and starts the client service with the selected transport
+6. Optional (legacy cores): asks SSH username/password and enables client SSH auth overlay
 7. Sets up 5-minute health checks + 30-second runtime watchdog and opens interactive monitor menu
 
 ### Health & Recovery
@@ -199,6 +213,20 @@ Run the same on both server and client hosts.
   - Client: `auth-client-enable` / `auth-client-disable`
 
 Note: on core `dnstm`, legacy SSH overlay commands are disabled because auth/backend handling is expected to be managed natively.
+
+## Native DNSTM Management
+
+- Server setup on core `dnstm` now installs/uses the native [dnstm](https://github.com/net2share/dnstm) manager.
+- Initial native stack is created automatically (`router install` + initial backend + initial tunnel).
+- Client setup on core `dnstm` can run either `slipstream` or `dnstt` transport per tunnel/instance.
+- You can manage native features either from menu (`Server Main Menu -> Native dnstm manager`) or directly:
+
+```bash
+slipstream-tunnel dnstm router status
+slipstream-tunnel dnstm tunnel list
+slipstream-tunnel dnstm backend list
+slipstream-tunnel dnstm ssh-users
+```
 
 ## Speed Profiles
 

@@ -16,10 +16,16 @@ SLIPSTREAM_VERSION=""
 SLIPSTREAM_ASSET_LAYOUT=""
 DNSCAN_REPO="nightowlnerd/dnscan"
 DNSCAN_VERSION="${DNSCAN_VERSION:-v1.4.0}"
+DNSTM_REPO="${DNSTM_REPO:-net2share/dnstm}"
+DNSTM_VERSION="${DNSTM_VERSION:-v0.6.5}"
+DNSTT_CLIENT_REPO="${DNSTT_CLIENT_REPO:-net2share/dnstt}"
+DNSTT_CLIENT_VERSION="${DNSTT_CLIENT_VERSION:-latest}"
 SCRIPT_REPO="${SCRIPT_REPO:-Recoba86/slipstream-tunnel-control}"
 SCRIPT_BRANCH="${SCRIPT_BRANCH:-main}"
 SLIPSTREAM_SERVER_BIN="${SLIPSTREAM_SERVER_BIN:-/usr/local/bin/slipstream-server}"
 SLIPSTREAM_CLIENT_BIN="${SLIPSTREAM_CLIENT_BIN:-/usr/local/bin/slipstream-client}"
+DNSTT_CLIENT_BIN="${DNSTT_CLIENT_BIN:-/usr/local/bin/dnstt-client}"
+DNSTM_BIN="${DNSTM_BIN:-/usr/local/bin/dnstm}"
 TUNNEL_CMD_BIN="${TUNNEL_CMD_BIN:-/usr/local/bin/slipstream-tunnel}"
 SST_BIN="${SST_BIN:-/usr/local/bin/sst}"
 # =============================================================================
@@ -94,6 +100,7 @@ Commands:
   m                   Short alias for menu
   speed-profile       Set profile: fast (SSH off) / secure (SSH on)
   core-switch         Switch current mode to another core (dnstm/nightowl/plus)
+  dnstm               Pass-through to native dnstm CLI (server core)
   auth-setup          Enable/update SSH auth overlay for server mode
   auth-disable        Disable SSH auth overlay for server mode
   auth-client-enable  Enable SSH auth overlay for client mode
@@ -115,10 +122,32 @@ Options:
   --slipstream <path> Path to slipstream binary (offline)
   --dnscan <path>     Path to dnscan tarball (client offline install)
   --dns-file <path>   Custom DNS server list (skips subnet scan)
+  --transport <type>  Client transport: slipstream (default) or dnstt (dnstm core)
+  --dnstt-pubkey <hex64>
+                      Client transport=dnstt: DNSTT server public key (64 hex chars)
+  --dnstt-client <path>
+                      Client transport=dnstt: path to local dnstt-client binary
+  --slipstream-cert <path>
+                      Client transport=slipstream: optional pinned server certificate path
   --manage-resolver   Server: allow script to manage systemd-resolved/resolv.conf
   --ssh-auth          Server: enable SSH username/password auth overlay
   --ssh-backend-port <port>
                       Server: SSH daemon port behind slipstream when --ssh-auth is enabled (default: 22)
+  --dnstm-bin <path>  Server: path to local dnstm binary (offline install/migration)
+  --dnstm-transport <slipstream|dnstt>
+                      Server (dnstm core): initial tunnel transport (default: slipstream)
+  --dnstm-backend <custom|socks|ssh|shadowsocks>
+                      Server (dnstm core): initial backend type (default: custom)
+  --dnstm-backend-tag <tag>
+                      Server (dnstm core): backend tag (default: app-main, or built-in socks/ssh)
+  --dnstm-tunnel-tag <tag>
+                      Server (dnstm core): tunnel tag (default: main)
+  --dnstm-mode <single|multi>
+                      Server (dnstm core): router mode to initialize (default: single)
+  --dnstm-ss-password <value>
+                      Server (dnstm core): optional Shadowsocks password for initial backend
+  --dnstm-ss-method <method>
+                      Server (dnstm core): Shadowsocks method (default: aes-256-gcm)
   --ssh-auth-client   Client: use SSH username/password overlay
   --ssh-user <name>   Client: SSH username (with --ssh-auth-client)
   --ssh-pass <pass>   Client: SSH password (with --ssh-auth-client)
@@ -127,6 +156,7 @@ Examples:
   slipstream-tunnel server --domain t.example.com
   slipstream-tunnel server --domain t.example.com --manage-resolver
   slipstream-tunnel client --domain t.example.com
+  slipstream-tunnel client --domain t.example.com --transport dnstt --dnstt-pubkey <hex64>
   slipstream-tunnel client --dns-file /tmp/dns-servers.txt
   slipstream-tunnel edit
   slipstream-tunnel stop
@@ -141,6 +171,7 @@ Examples:
   slipstream-tunnel menu
   slipstream-tunnel speed-profile fast
   slipstream-tunnel core-switch dnstm
+  slipstream-tunnel dnstm router status
   slipstream-tunnel auth-add
   sst
 EOF
@@ -234,6 +265,35 @@ slipstream_asset_name() {
   *)
     error "Unknown SLIPSTREAM_ASSET_LAYOUT: $SLIPSTREAM_ASSET_LAYOUT"
     ;;
+  esac
+}
+
+dnstm_arch_token() {
+  local arch="$1"
+  case "$arch" in
+  x86_64) echo "amd64" ;;
+  arm64) echo "arm64" ;;
+  *) error "Unsupported architecture for dnstm binary: $arch" ;;
+  esac
+}
+
+dnstm_asset_name() {
+  local arch="$1" token
+  token=$(dnstm_arch_token "$arch")
+  echo "dnstm-linux-${token}"
+}
+
+dnstt_client_asset_name() {
+  local arch="$1" token
+  token=$(dnstm_arch_token "$arch")
+  echo "dnstt-client-linux-${token}"
+}
+
+validate_transport_or_error() {
+  local transport="$1"
+  case "$transport" in
+  slipstream | dnstt) ;;
+  *) error "Invalid transport: $transport (use slipstream or dnstt)" ;;
   esac
 }
 
@@ -480,6 +540,11 @@ validate_unix_username_or_error() {
   [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || error "Invalid username: $username"
 }
 
+validate_dnstt_pubkey_or_error() {
+  local pubkey="$1"
+  [[ "$pubkey" =~ ^[A-Fa-f0-9]{64}$ ]] || error "Invalid DNSTT public key (must be 64 hex chars)"
+}
+
 validate_instance_name_or_error() {
   local name="$1"
   [[ "$name" =~ ^[a-z][a-z0-9_-]{0,30}$ ]] || error "Invalid instance name: $name (use: a-z, 0-9, -, _)"
@@ -558,7 +623,52 @@ collect_known_resolver_candidates() {
         is_valid_ipv4 "$candidate" && echo "$candidate"
       done
     fi
+
+    if [[ -f /etc/resolv.conf ]]; then
+      awk '/^[[:space:]]*nameserver[[:space:]]+/ {print $2}' /etc/resolv.conf 2>/dev/null \
+        | while IFS= read -r candidate; do
+          [[ -n "$candidate" ]] || continue
+          is_valid_ipv4 "$candidate" || continue
+          [[ "$candidate" == 127.* ]] && continue
+          echo "$candidate"
+        done
+    fi
+
+    # Common public resolvers as fallback candidates.
+    echo "9.9.9.9"
+    echo "1.1.1.1"
+    echo "8.8.8.8"
+    echo "208.67.222.222"
+    echo "208.67.220.220"
   } | awk '!seen[$0]++'
+}
+
+refresh_resolver_candidates_file() {
+  local domain="$1" output_file="$2" seed_file="${3:-}" preferred="${4:-}"
+  local tmp candidate
+
+  [[ -n "$domain" ]] || error "Internal error: domain is required for resolver refresh"
+  tmp=$(mktemp /tmp/resolvers.XXXXXX.txt)
+
+  {
+    [[ -n "$preferred" ]] && echo "$preferred"
+    [[ -f "$output_file" ]] && cat "$output_file"
+    if [[ -n "$seed_file" && -f "$seed_file" && "$seed_file" != "$output_file" ]]; then
+      cat "$seed_file"
+    fi
+    collect_known_resolver_candidates
+  } | while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    is_valid_ipv4 "$candidate" || continue
+    resolver_answers_dns_queries "$candidate" || continue
+    echo "$candidate"
+  done | awk '!seen[$0]++' >"$tmp"
+
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$output_file"
 }
 
 prompt_instance_resolver_or_error() {
@@ -642,6 +752,10 @@ load_instance_config_or_error() {
   [[ -f "$cfg" ]] || error "No such instance: $name"
   # shellcheck disable=SC1090
   source "$cfg"
+  if [[ -z "${SLIPSTREAM_CORE:-}" ]]; then
+    SLIPSTREAM_CORE="nightowl"
+  fi
+  set_slipstream_source "${SLIPSTREAM_CORE:-dnstm}"
 }
 
 port_in_use() {
@@ -704,6 +818,182 @@ download_release_asset_verified() {
 
   actual_sha=$(sha256_of_file "$output")
   [[ "$actual_sha" == "$expected_sha" ]] || return 1
+}
+
+dnstm_is_installed() {
+  [[ -x "$DNSTM_BIN" ]]
+}
+
+run_dnstm() {
+  dnstm_is_installed || error "dnstm binary is not installed: $DNSTM_BIN"
+  "$DNSTM_BIN" "$@"
+}
+
+ensure_dnstm_binary() {
+  local arch source_path="${1:-}" asset tmp_bin
+
+  if dnstm_is_installed; then
+    return 0
+  fi
+
+  if [[ -n "$source_path" ]]; then
+    log "Installing dnstm binary from $source_path..."
+    cp "$source_path" "$DNSTM_BIN"
+    chmod +x "$DNSTM_BIN"
+    warn "Local dnstm binary was not checksum-verified"
+    return 0
+  fi
+
+  arch=$(detect_arch)
+  asset=$(dnstm_asset_name "$arch")
+  tmp_bin=$(mktemp /tmp/dnstm.XXXXXX.bin)
+
+  if download_release_asset_verified "$DNSTM_REPO" "$DNSTM_VERSION" "$asset" "$tmp_bin"; then
+    install -m 0755 "$tmp_bin" "$DNSTM_BIN"
+    rm -f "$tmp_bin"
+    log "Installed dnstm binary: ${DNSTM_REPO}@${DNSTM_VERSION}"
+    return 0
+  fi
+  rm -f "$tmp_bin"
+
+  warn "Automatic dnstm download failed for ${asset}"
+  echo ""
+  echo "Failed URL:"
+  echo "  https://github.com/${DNSTM_REPO}/releases/download/${DNSTM_VERSION}/${asset}"
+  echo ""
+  prompt_read source_path "Provide local dnstm binary path (or Ctrl+C to abort): "
+  [[ -n "$source_path" ]] || error "No local dnstm binary path provided"
+  cp "$source_path" "$DNSTM_BIN"
+  chmod +x "$DNSTM_BIN"
+  warn "Local dnstm binary was not checksum-verified"
+}
+
+ensure_slipstream_client_binary() {
+  if [[ -x "$SLIPSTREAM_CLIENT_BIN" ]]; then
+    return 0
+  fi
+  local arch
+  arch=$(detect_arch)
+  download_slipstream_component "client" "$SLIPSTREAM_CLIENT_BIN" "$arch" \
+    || error "Failed to download slipstream-client binary"
+  chmod +x "$SLIPSTREAM_CLIENT_BIN"
+}
+
+ensure_dnstt_client_binary() {
+  local source_path="${1:-}" arch asset url tmp_bin
+
+  if [[ -x "$DNSTT_CLIENT_BIN" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$source_path" ]]; then
+    log "Installing dnstt-client from $source_path..."
+    cp "$source_path" "$DNSTT_CLIENT_BIN"
+    chmod +x "$DNSTT_CLIENT_BIN"
+    warn "Local dnstt-client binary was not checksum-verified"
+    return 0
+  fi
+
+  arch=$(detect_arch)
+  asset=$(dnstt_client_asset_name "$arch")
+  url="https://github.com/${DNSTT_CLIENT_REPO}/releases/download/${DNSTT_CLIENT_VERSION}/${asset}"
+  tmp_bin=$(mktemp /tmp/dnstt-client.XXXXXX.bin)
+  if curl -fsSL --connect-timeout 20 "$url" -o "$tmp_bin"; then
+    install -m 0755 "$tmp_bin" "$DNSTT_CLIENT_BIN"
+    rm -f "$tmp_bin"
+    log "Installed dnstt-client: ${DNSTT_CLIENT_REPO}@${DNSTT_CLIENT_VERSION}"
+    warn "dnstt-client download was not checksum-verified"
+    return 0
+  fi
+  rm -f "$tmp_bin"
+
+  warn "Automatic dnstt-client download failed for ${asset}"
+  echo ""
+  echo "Failed URL:"
+  echo "  $url"
+  echo ""
+  prompt_read source_path "Provide local dnstt-client binary path (or Ctrl+C to abort): "
+  [[ -n "$source_path" ]] || error "No local dnstt-client binary path provided"
+  cp "$source_path" "$DNSTT_CLIENT_BIN"
+  chmod +x "$DNSTT_CLIENT_BIN"
+  warn "Local dnstt-client binary was not checksum-verified"
+}
+
+dnstm_backend_address_for_type() {
+  local backend_type="$1" app_port="$2"
+  case "$backend_type" in
+  custom) echo "127.0.0.1:${app_port}" ;;
+  socks) echo "127.0.0.1:1080" ;;
+  ssh) echo "127.0.0.1:22" ;;
+  shadowsocks) echo "managed-by-dnstm" ;;
+  *) echo "unknown" ;;
+  esac
+}
+
+dnstm_validate_transport_or_error() {
+  local transport="$1"
+  case "$transport" in
+  slipstream | dnstt) ;;
+  *) error "Invalid dnstm transport: $transport (use slipstream or dnstt)" ;;
+  esac
+}
+
+dnstm_validate_backend_type_or_error() {
+  local backend_type="$1"
+  case "$backend_type" in
+  custom | socks | ssh | shadowsocks) ;;
+  *) error "Invalid dnstm backend type: $backend_type (use custom, socks, ssh, or shadowsocks)" ;;
+  esac
+}
+
+dnstm_setup_server_stack() {
+  local domain="$1"
+  local app_port="$2"
+  local transport="$3"
+  local backend_type="$4"
+  local backend_tag="$5"
+  local tunnel_tag="$6"
+  local router_mode="$7"
+  local ss_password="${8:-}"
+  local ss_method="${9:-aes-256-gcm}"
+
+  dnstm_validate_transport_or_error "$transport"
+  dnstm_validate_backend_type_or_error "$backend_type"
+  validate_domain_or_error "$domain"
+  validate_port_or_error "$app_port"
+  [[ "$router_mode" == "single" || "$router_mode" == "multi" ]] || error "Invalid dnstm router mode: $router_mode"
+  [[ -n "$backend_tag" ]] || error "DNSTM backend tag cannot be empty"
+  [[ -n "$tunnel_tag" ]] || error "DNSTM tunnel tag cannot be empty"
+
+  log "Preparing native dnstm stack..."
+  run_dnstm install --force --mode "$router_mode"
+
+  # Keep setup idempotent for reruns/migrations.
+  run_dnstm tunnel remove -t "$tunnel_tag" --force >/dev/null 2>&1 || true
+  run_dnstm backend remove -t "$backend_tag" --force >/dev/null 2>&1 || true
+
+  case "$backend_type" in
+  custom)
+    run_dnstm backend add --type custom -t "$backend_tag" --address "127.0.0.1:${app_port}"
+    ;;
+  shadowsocks)
+    if [[ -n "$ss_password" ]]; then
+      run_dnstm backend add --type shadowsocks -t "$backend_tag" --password "$ss_password" --method "$ss_method"
+    else
+      run_dnstm backend add --type shadowsocks -t "$backend_tag" --method "$ss_method"
+    fi
+    ;;
+  socks | ssh)
+    # Built-in backends created by dnstm install.
+    backend_tag="$backend_type"
+    ;;
+  esac
+
+  run_dnstm tunnel add --transport "$transport" --backend "$backend_tag" --domain "$domain" -t "$tunnel_tag"
+  if [[ "$router_mode" == "single" ]]; then
+    run_dnstm router switch -t "$tunnel_tag" >/dev/null 2>&1 || true
+  fi
+  run_dnstm router start >/dev/null 2>&1 || true
 }
 
 should_auto_fallback_to_plus_for_arm() {
@@ -862,7 +1152,9 @@ auto_fix_port_53_conflict() {
   owners=$(port_53_owners || true)
   if [[ -n "$owners" ]]; then
     echo "Current listeners on :53:"
-    echo "$owners" | sed 's/^/  /'
+    while IFS= read -r line; do
+      echo "  $line"
+    done <<<"$owners"
   fi
 
   if stop_disable_unit_if_active "systemd-resolved.service" "systemd-resolved"; then
@@ -891,7 +1183,9 @@ auto_fix_port_53_conflict() {
     warn "Port 53 is still busy after automatic attempts."
     if [[ -n "$owners" ]]; then
       echo "Still listening on :53:"
-      echo "$owners" | sed 's/^/  /'
+      while IFS= read -r line; do
+        echo "  $line"
+      done <<<"$owners"
     fi
     return 1
   fi
@@ -1468,6 +1762,14 @@ cmd_server() {
   local core_from_flag=false
   local domain="" port="2053" slipstream_path="" manage_resolver=false
   local enable_ssh_auth=false ssh_backend_port="22"
+  local dnstm_path=""
+  local dnstm_transport="slipstream"
+  local dnstm_backend="custom"
+  local dnstm_backend_tag="app-main"
+  local dnstm_tunnel_tag="main"
+  local dnstm_router_mode="single"
+  local dnstm_ss_password=""
+  local dnstm_ss_method="aes-256-gcm"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1506,6 +1808,46 @@ cmd_server() {
       enable_ssh_auth=true
       shift 2
       ;;
+    --dnstm-bin)
+      require_flag_value "$1" "${2:-}"
+      dnstm_path="$2"
+      shift 2
+      ;;
+    --dnstm-transport)
+      require_flag_value "$1" "${2:-}"
+      dnstm_transport="$2"
+      shift 2
+      ;;
+    --dnstm-backend)
+      require_flag_value "$1" "${2:-}"
+      dnstm_backend="$2"
+      shift 2
+      ;;
+    --dnstm-backend-tag)
+      require_flag_value "$1" "${2:-}"
+      dnstm_backend_tag="$2"
+      shift 2
+      ;;
+    --dnstm-tunnel-tag)
+      require_flag_value "$1" "${2:-}"
+      dnstm_tunnel_tag="$2"
+      shift 2
+      ;;
+    --dnstm-mode)
+      require_flag_value "$1" "${2:-}"
+      dnstm_router_mode="$2"
+      shift 2
+      ;;
+    --dnstm-ss-password)
+      require_flag_value "$1" "${2:-}"
+      dnstm_ss_password="$2"
+      shift 2
+      ;;
+    --dnstm-ss-method)
+      require_flag_value "$1" "${2:-}"
+      dnstm_ss_method="$2"
+      shift 2
+      ;;
     -h | --help)
       usage
       ;;
@@ -1527,6 +1869,15 @@ cmd_server() {
   validate_port_or_error "$port"
   [[ -n "$ssh_backend_port" ]] && validate_port_or_error "$ssh_backend_port"
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
+  if [[ "$SLIPSTREAM_CORE" == "dnstm" ]]; then
+    dnstm_validate_transport_or_error "$dnstm_transport"
+    dnstm_validate_backend_type_or_error "$dnstm_backend"
+    [[ "$dnstm_router_mode" == "single" || "$dnstm_router_mode" == "multi" ]] \
+      || error "Invalid dnstm mode: $dnstm_router_mode (use single or multi)"
+    if [[ "$dnstm_transport" == "dnstt" && "$dnstm_backend" == "shadowsocks" ]]; then
+      error "DNSTT transport does not support shadowsocks backend"
+    fi
+  fi
 
   log "=== Slipstream Server Setup ==="
   log "Core source: ${SLIPSTREAM_CORE} (${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION}, layout=${SLIPSTREAM_ASSET_LAYOUT})"
@@ -1635,6 +1986,95 @@ cmd_server() {
   if [[ "$manage_resolver" == true ]]; then
     backup_resolver_if_needed
     ensure_static_resolver_config
+  fi
+
+  if [[ "$SLIPSTREAM_CORE" == "dnstm" ]]; then
+    if [[ "$enable_ssh_auth" == true ]]; then
+      warn "Ignoring --ssh-auth flags: native dnstm backend/auth management is used on core '${SLIPSTREAM_CORE}'."
+    fi
+
+    if [[ -t 0 ]]; then
+      read -r -p "dnstm router mode [single/multi] [$dnstm_router_mode]: " input
+      [[ -n "$input" ]] && dnstm_router_mode="$input"
+      read -r -p "Initial tunnel transport [slipstream/dnstt] [$dnstm_transport]: " input
+      [[ -n "$input" ]] && dnstm_transport="$input"
+      read -r -p "Initial backend type [custom/socks/ssh/shadowsocks] [$dnstm_backend]: " input
+      [[ -n "$input" ]] && dnstm_backend="$input"
+      dnstm_validate_transport_or_error "$dnstm_transport"
+      dnstm_validate_backend_type_or_error "$dnstm_backend"
+      [[ "$dnstm_router_mode" == "single" || "$dnstm_router_mode" == "multi" ]] \
+        || error "Invalid dnstm mode: $dnstm_router_mode (use single or multi)"
+      if [[ "$dnstm_transport" == "dnstt" && "$dnstm_backend" == "shadowsocks" ]]; then
+        error "DNSTT transport does not support shadowsocks backend"
+      fi
+      case "$dnstm_backend" in
+      custom)
+        read -r -p "Protected app port for custom backend [$port]: " input
+        [[ -n "$input" ]] && port="$input"
+        validate_port_or_error "$port"
+        ;;
+      shadowsocks)
+        read -r -p "Shadowsocks method [$dnstm_ss_method]: " input
+        [[ -n "$input" ]] && dnstm_ss_method="$input"
+        read -r -p "Shadowsocks password (Enter to auto-generate): " input
+        [[ -n "$input" ]] && dnstm_ss_password="$input"
+        ;;
+      esac
+      read -r -p "Backend tag [$dnstm_backend_tag]: " input
+      [[ -n "$input" ]] && dnstm_backend_tag="$input"
+      read -r -p "Tunnel tag [$dnstm_tunnel_tag]: " input
+      [[ -n "$input" ]] && dnstm_tunnel_tag="$input"
+    fi
+
+    case "$dnstm_backend" in
+    socks) dnstm_backend_tag="socks" ;;
+    ssh) dnstm_backend_tag="ssh" ;;
+    esac
+
+    ensure_dnstm_binary "$dnstm_path"
+    dnstm_setup_server_stack "$domain" "$port" "$dnstm_transport" "$dnstm_backend" "$dnstm_backend_tag" "$dnstm_tunnel_tag" "$dnstm_router_mode" "$dnstm_ss_password" "$dnstm_ss_method"
+
+    # Legacy service may exist from previous cores.
+    systemctl stop slipstream-server 2>/dev/null || true
+    systemctl disable slipstream-server 2>/dev/null || true
+
+    mkdir -p "$TUNNEL_DIR"
+    cat >"$CONFIG_FILE" <<EOF
+DOMAIN=$domain
+MODE=server
+PORT=$port
+MANAGE_RESOLVER=$manage_resolver
+SLIPSTREAM_CORE=$SLIPSTREAM_CORE
+SLIPSTREAM_REPO=$SLIPSTREAM_REPO
+SLIPSTREAM_VERSION=$SLIPSTREAM_VERSION
+SLIPSTREAM_ASSET_LAYOUT=$SLIPSTREAM_ASSET_LAYOUT
+DNSTM_REPO=$DNSTM_REPO
+DNSTM_VERSION=$DNSTM_VERSION
+DNSTM_MODE=$dnstm_router_mode
+DNSTM_TRANSPORT=$dnstm_transport
+DNSTM_BACKEND_TYPE=$dnstm_backend
+DNSTM_BACKEND_TAG=$dnstm_backend_tag
+DNSTM_TUNNEL_TAG=$dnstm_tunnel_tag
+DNSTM_BACKEND_ADDRESS=$(dnstm_backend_address_for_type "$dnstm_backend" "$port")
+SSH_AUTH_ENABLED=false
+SSH_BACKEND_PORT=
+EOF
+
+    install_self
+    echo ""
+    echo -e "${GREEN}=== Server Ready (dnstm native mode) ===${NC}"
+    echo ""
+    echo "Native manager:"
+    echo "  dnstm router status"
+    echo "  dnstm tunnel list"
+    echo "  dnstm backend list"
+    echo ""
+    echo "Through this script:"
+    echo "  slipstream-tunnel status"
+    echo "  slipstream-tunnel dnstm router status"
+    echo "  slipstream-tunnel menu"
+    echo "  sst"
+    return 0
   fi
 
   if [[ "$enable_ssh_auth" == false && -t 0 ]]; then
@@ -1768,7 +2208,24 @@ EOF
 
 write_client_service_named() {
   local service_name="$1" resolver="$2" domain="$3" port="$4"
-  local bin_path="$SLIPSTREAM_CLIENT_BIN"
+  local transport="${5:-slipstream}" slipstream_cert="${6:-}" dnstt_pubkey="${7:-}"
+  local exec_start=""
+
+  validate_transport_or_error "$transport"
+  validate_ipv4_or_error "$resolver"
+  validate_domain_or_error "$domain"
+  validate_port_or_error "$port"
+
+  if [[ "$transport" == "dnstt" ]]; then
+    validate_dnstt_pubkey_or_error "$dnstt_pubkey"
+    exec_start="$DNSTT_CLIENT_BIN -udp ${resolver}:53 -pubkey ${dnstt_pubkey} ${domain} 127.0.0.1:${port}"
+  else
+    exec_start="$SLIPSTREAM_CLIENT_BIN --resolver ${resolver}:53 --domain ${domain} --tcp-listen-port ${port}"
+    if [[ -n "$slipstream_cert" ]]; then
+      [[ -f "$slipstream_cert" ]] || error "Slipstream cert file not found: $slipstream_cert"
+      exec_start="$exec_start --cert $slipstream_cert"
+    fi
+  fi
 
   cat >"/etc/systemd/system/${service_name}.service" <<EOF
 [Unit]
@@ -1780,10 +2237,7 @@ StartLimitIntervalSec=0
 Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
-ExecStart=$bin_path \\
-  --resolver ${resolver}:53 \\
-  --domain $domain \\
-  --tcp-listen-port $port
+ExecStart=$exec_start
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -1801,8 +2255,10 @@ EOF
 }
 
 write_client_service() {
-  local resolver="$1" domain="$2" port="$3"
-  write_client_service_named "slipstream-client" "$resolver" "$domain" "$port"
+  local resolver="$1" domain="$2" port="$3" transport="${4:-${DNSTM_TRANSPORT:-slipstream}}"
+  local slipstream_cert="${5:-${DNSTM_SLIPSTREAM_CERT:-}}"
+  local dnstt_pubkey="${6:-${DNSTM_DNSTT_PUBKEY:-}}"
+  write_client_service_named "slipstream-client" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey"
 }
 
 client_transport_port_from_config() {
@@ -1915,6 +2371,7 @@ cmd_client() {
   local slipstream_core="$SLIPSTREAM_CORE"
   local core_from_flag=false
   local domain="" dnscan_path="" slipstream_path="" port="7000" dns_file=""
+  local client_transport="slipstream" dnstt_pubkey="" dnstt_client_path="" slipstream_cert=""
   local port_from_flag=false
   local ssh_auth_client=false ssh_user="" ssh_pass="" ssh_remote_port="2053" ssh_transport_port="17070"
 
@@ -1950,6 +2407,26 @@ cmd_client() {
     --dns-file)
       require_flag_value "$1" "${2:-}"
       dns_file="$2"
+      shift 2
+      ;;
+    --transport)
+      require_flag_value "$1" "${2:-}"
+      client_transport="$2"
+      shift 2
+      ;;
+    --dnstt-pubkey)
+      require_flag_value "$1" "${2:-}"
+      dnstt_pubkey="$2"
+      shift 2
+      ;;
+    --dnstt-client)
+      require_flag_value "$1" "${2:-}"
+      dnstt_client_path="$2"
+      shift 2
+      ;;
+    --slipstream-cert)
+      require_flag_value "$1" "${2:-}"
+      slipstream_cert="$2"
       shift 2
       ;;
     --ssh-auth-client)
@@ -1989,6 +2466,33 @@ cmd_client() {
     ssh_remote_port=""
     ssh_transport_port=""
   fi
+  validate_transport_or_error "$client_transport"
+  if [[ "$client_transport" == "dnstt" && "${SLIPSTREAM_CORE}" != "dnstm" ]]; then
+    error "Transport 'dnstt' is supported only with core 'dnstm'"
+  fi
+  if [[ -t 0 ]]; then
+    local input_transport=""
+    if [[ "${SLIPSTREAM_CORE}" == "dnstm" ]]; then
+      read -r -p "Client transport [slipstream/dnstt] [${client_transport}]: " input_transport
+      [[ -n "$input_transport" ]] && client_transport="$input_transport"
+      validate_transport_or_error "$client_transport"
+    else
+      client_transport="slipstream"
+    fi
+  fi
+  if [[ "$client_transport" == "dnstt" ]]; then
+    if [[ -z "$dnstt_pubkey" && -t 0 ]]; then
+      read -r -p "DNSTT public key (64 hex chars): " dnstt_pubkey
+    fi
+    validate_dnstt_pubkey_or_error "$dnstt_pubkey"
+    slipstream_cert=""
+  else
+    if [[ -z "$slipstream_cert" && -t 0 ]]; then
+      read -r -p "Pinned slipstream cert path (Enter to skip): " slipstream_cert
+    fi
+    [[ -z "$slipstream_cert" || -f "$slipstream_cert" ]] || error "Slipstream cert file not found: $slipstream_cert"
+    dnstt_pubkey=""
+  fi
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
   [[ -n "$dns_file" ]] && validate_dns_file_or_error "$dns_file"
 
@@ -1999,7 +2503,6 @@ cmd_client() {
   ensure_service_user
   mkdir -p "$TUNNEL_DIR" "$DNSCAN_DIR"
 
-  # Get dnscan
   local arch os dnscan_arch
   arch=$(detect_arch)
   os=$(detect_os)
@@ -2009,36 +2512,39 @@ cmd_client() {
   *) error "Unsupported dnscan architecture mapping: $arch" ;;
   esac
 
-  if [[ ! -x "$DNSCAN_DIR/dnscan" ]]; then
-    if [[ -n "$dnscan_path" ]]; then
-      log "Extracting dnscan from $dnscan_path..."
-      tar xzf "$dnscan_path" -C "$DNSCAN_DIR"
-    else
-      log "Downloading dnscan..."
-      local dnscan_asset="dnscan-${os}-${dnscan_arch}.tar.gz"
-      local tmp_dnscan
-      tmp_dnscan=$(mktemp /tmp/dnscan.XXXXXX.tar.gz)
-      if download_release_asset_verified "$DNSCAN_REPO" "$DNSCAN_VERSION" "$dnscan_asset" "$tmp_dnscan"; then
-        tar xzf "$tmp_dnscan" -C "$DNSCAN_DIR"
-        rm -f "$tmp_dnscan"
-      else
-        rm -f "$tmp_dnscan"
-        echo ""
-        warn "Cannot download dnscan (network blocked?)"
-        echo ""
-        echo "Transfer this file from a non-blocked network:"
-        echo "  https://github.com/${DNSCAN_REPO}/releases/download/${DNSCAN_VERSION}/${dnscan_asset}"
-        echo ""
-        read -e -p "Path to dnscan tarball: " dnscan_path
+  if [[ "$client_transport" != "dnstt" ]]; then
+    # Get dnscan for slipstream verification scans.
+    if [[ ! -x "$DNSCAN_DIR/dnscan" ]]; then
+      if [[ -n "$dnscan_path" ]]; then
+        log "Extracting dnscan from $dnscan_path..."
         tar xzf "$dnscan_path" -C "$DNSCAN_DIR"
+      else
+        log "Downloading dnscan..."
+        local dnscan_asset="dnscan-${os}-${dnscan_arch}.tar.gz"
+        local tmp_dnscan
+        tmp_dnscan=$(mktemp /tmp/dnscan.XXXXXX.tar.gz)
+        if download_release_asset_verified "$DNSCAN_REPO" "$DNSCAN_VERSION" "$dnscan_asset" "$tmp_dnscan"; then
+          tar xzf "$tmp_dnscan" -C "$DNSCAN_DIR"
+          rm -f "$tmp_dnscan"
+        else
+          rm -f "$tmp_dnscan"
+          echo ""
+          warn "Cannot download dnscan (network blocked?)"
+          echo ""
+          echo "Transfer this file from a non-blocked network:"
+          echo "  https://github.com/${DNSCAN_REPO}/releases/download/${DNSCAN_VERSION}/${dnscan_asset}"
+          echo ""
+          read -r -e -p "Path to dnscan tarball: " dnscan_path
+          tar xzf "$dnscan_path" -C "$DNSCAN_DIR"
+        fi
       fi
+      chmod +x "$DNSCAN_DIR/dnscan"
     fi
-    chmod +x "$DNSCAN_DIR/dnscan"
   fi
 
   # Get domain
   if [[ -z "$domain" ]]; then
-    read -p "Enter tunnel domain (e.g., t.example.com): " domain
+    read -r -p "Enter tunnel domain (e.g., t.example.com): " domain
     validate_domain_or_error "$domain"
   fi
 
@@ -2077,55 +2583,6 @@ cmd_client() {
     [[ "$ssh_transport_port" != "$port" ]] || error "Internal SSH transport port must differ from client listen port"
   fi
 
-  # Get slipstream binary (required for --verify)
-  local slipstream_bin="$TUNNEL_DIR/slipstream-client"
-  local installed_bin="$SLIPSTREAM_CLIENT_BIN"
-  local slipstream_asset
-  slipstream_asset=$(slipstream_asset_name "client" "$arch")
-
-  if [[ -x "$slipstream_bin" ]]; then
-    # Use cached binary
-    log "Using cached slipstream-client"
-  elif [[ -x "$installed_bin" ]]; then
-    # Already installed, use existing
-    slipstream_bin="$installed_bin"
-  elif [[ -n "$slipstream_path" ]]; then
-    log "Copying slipstream-client from $slipstream_path..."
-    if ! cp "$slipstream_path" "$slipstream_bin" 2>/dev/null; then
-      error "Cannot copy from $slipstream_path"
-    fi
-    chmod +x "$slipstream_bin"
-    warn "Local slipstream binary was not checksum-verified"
-  else
-    log "Downloading slipstream-client..."
-    if download_slipstream_component "client" "$slipstream_bin" "$arch"; then
-      :
-    else
-      echo ""
-      warn "Cannot download slipstream-client (network blocked?)"
-      echo ""
-      echo "Transfer this asset from a non-blocked network:"
-      echo "  https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_VERSION}/${slipstream_asset}"
-      echo ""
-      read -e -p "Path to slipstream-client binary: " slipstream_path
-      if [[ -z "$slipstream_path" ]]; then
-        error "Binary required for verification. Cannot continue."
-      fi
-      if ! cp "$slipstream_path" "$slipstream_bin" 2>/dev/null; then
-        error "Cannot copy from $slipstream_path"
-      fi
-    fi
-    chmod +x "$slipstream_bin"
-  fi
-
-  # Run dnscan
-  log "Scanning for working DNS servers..."
-  local dnscan_args=(
-    --domain "$domain"
-    --data-dir "$DNSCAN_DIR/data"
-    --output "$SERVERS_FILE"
-    --verify "$slipstream_bin"
-  )
   local scan_source="generated"
   local scan_file=""
   local scan_country="ir"
@@ -2133,89 +2590,155 @@ cmd_client() {
   local scan_workers="500"
   local scan_timeout="2s"
   local scan_threshold="50"
+  local best_server best_latency
+  local slipstream_bin="" installed_bin="$SLIPSTREAM_CLIENT_BIN" slipstream_asset=""
+  if [[ "$client_transport" == "dnstt" ]]; then
+    ensure_dnstt_client_binary "$dnstt_client_path"
 
-  # Scan settings
-  echo ""
-  echo -e "${YELLOW}=== DNS Scan Settings ===${NC}"
-  echo ""
-
-  if [[ -n "$dns_file" ]]; then
-    # Custom DNS file from CLI flag
-    log "Using custom DNS file: $dns_file"
-    scan_source="file"
-    scan_file="$dns_file"
-    dnscan_args+=(--file "$dns_file")
-    read -p "Workers [500]: " input_workers
-    [[ -n "$input_workers" ]] && scan_workers="$input_workers"
-    read -p "Timeout [2s]: " input_timeout
-    [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
-    read -p "Benchmark threshold % [50]: " input_threshold
-    [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
-    dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
-  else
-    # Ask for custom file first
-    read -e -p "Custom DNS file (Enter to scan): " input_dns_file
-    if [[ -n "$input_dns_file" ]]; then
-      validate_dns_file_or_error "$input_dns_file"
-      log "Using custom DNS file: $input_dns_file"
+    if [[ -n "$dns_file" ]]; then
       scan_source="file"
-      scan_file="$input_dns_file"
-      dnscan_args+=(--file "$input_dns_file")
-      read -p "Workers [500]: " input_workers
+      scan_file="$dns_file"
+    elif [[ -t 0 ]]; then
+      read -r -e -p "Custom DNS file for resolver candidates (Enter to auto-build): " input_dns_file
+      if [[ -n "$input_dns_file" ]]; then
+        scan_source="file"
+        scan_file="$input_dns_file"
+      fi
+    fi
+
+    if [[ "$scan_source" == "file" ]]; then
+      validate_dns_file_or_error "$scan_file"
+      refresh_resolver_candidates_file "$domain" "$SERVERS_FILE" "$scan_file" "" \
+        || error "No reachable DNS resolvers from '$scan_file'"
+    else
+      refresh_resolver_candidates_file "$domain" "$SERVERS_FILE" "" "" \
+        || error "No reachable DNS resolvers found. Re-run with --dns-file"
+    fi
+  else
+    # Get slipstream binary (required for --verify)
+    slipstream_bin="$TUNNEL_DIR/slipstream-client"
+    slipstream_asset=$(slipstream_asset_name "client" "$arch")
+
+    if [[ -x "$slipstream_bin" ]]; then
+      log "Using cached slipstream-client"
+    elif [[ -x "$installed_bin" ]]; then
+      slipstream_bin="$installed_bin"
+    elif [[ -n "$slipstream_path" ]]; then
+      log "Copying slipstream-client from $slipstream_path..."
+      if ! cp "$slipstream_path" "$slipstream_bin" 2>/dev/null; then
+        error "Cannot copy from $slipstream_path"
+      fi
+      chmod +x "$slipstream_bin"
+      warn "Local slipstream binary was not checksum-verified"
+    else
+      log "Downloading slipstream-client..."
+      if download_slipstream_component "client" "$slipstream_bin" "$arch"; then
+        :
+      else
+        echo ""
+        warn "Cannot download slipstream-client (network blocked?)"
+        echo ""
+        echo "Transfer this asset from a non-blocked network:"
+        echo "  https://github.com/${SLIPSTREAM_REPO}/releases/download/${SLIPSTREAM_VERSION}/${slipstream_asset}"
+        echo ""
+        read -r -e -p "Path to slipstream-client binary: " slipstream_path
+        if [[ -z "$slipstream_path" ]]; then
+          error "Binary required for verification. Cannot continue."
+        fi
+        if ! cp "$slipstream_path" "$slipstream_bin" 2>/dev/null; then
+          error "Cannot copy from $slipstream_path"
+        fi
+      fi
+      chmod +x "$slipstream_bin"
+    fi
+
+    # Run dnscan
+    log "Scanning for working DNS servers..."
+    local dnscan_args=(
+      --domain "$domain"
+      --data-dir "$DNSCAN_DIR/data"
+      --output "$SERVERS_FILE"
+      --verify "$slipstream_bin"
+    )
+
+    echo ""
+    echo -e "${YELLOW}=== DNS Scan Settings ===${NC}"
+    echo ""
+
+    if [[ -n "$dns_file" ]]; then
+      log "Using custom DNS file: $dns_file"
+      scan_source="file"
+      scan_file="$dns_file"
+      dnscan_args+=(--file "$dns_file")
+      read -r -p "Workers [500]: " input_workers
       [[ -n "$input_workers" ]] && scan_workers="$input_workers"
-      read -p "Timeout [2s]: " input_timeout
+      read -r -p "Timeout [2s]: " input_timeout
       [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
-      read -p "Benchmark threshold % [50]: " input_threshold
+      read -r -p "Benchmark threshold % [50]: " input_threshold
       [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
       dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
     else
-      # Show scan options
-      echo ""
-      echo "Modes:"
-      echo "  list   - Known working DNS servers (fastest)"
-      echo "  fast   - Sample common IPs per subnet (default)"
-      echo "  medium - More IPs per subnet"
-      echo "  all    - All IPs per subnet (slowest)"
-      echo ""
-      read -p "Country code [ir]: " input_country
-      [[ -n "$input_country" ]] && scan_country="$input_country"
-      read -p "Scan mode [fast]: " input_mode
-      [[ -n "$input_mode" ]] && scan_mode="$input_mode"
-      read -p "Workers [500]: " input_workers
-      [[ -n "$input_workers" ]] && scan_workers="$input_workers"
-      read -p "Timeout [2s]: " input_timeout
-      [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
-      read -p "Benchmark threshold % [50]: " input_threshold
-      [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
+      read -r -e -p "Custom DNS file (Enter to scan): " input_dns_file
+      if [[ -n "$input_dns_file" ]]; then
+        validate_dns_file_or_error "$input_dns_file"
+        log "Using custom DNS file: $input_dns_file"
+        scan_source="file"
+        scan_file="$input_dns_file"
+        dnscan_args+=(--file "$input_dns_file")
+        read -r -p "Workers [500]: " input_workers
+        [[ -n "$input_workers" ]] && scan_workers="$input_workers"
+        read -r -p "Timeout [2s]: " input_timeout
+        [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+        read -r -p "Benchmark threshold % [50]: " input_threshold
+        [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
+        dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
+      else
+        echo ""
+        echo "Modes:"
+        echo "  list   - Known working DNS servers (fastest)"
+        echo "  fast   - Sample common IPs per subnet (default)"
+        echo "  medium - More IPs per subnet"
+        echo "  all    - All IPs per subnet (slowest)"
+        echo ""
+        read -r -p "Country code [ir]: " input_country
+        [[ -n "$input_country" ]] && scan_country="$input_country"
+        read -r -p "Scan mode [fast]: " input_mode
+        [[ -n "$input_mode" ]] && scan_mode="$input_mode"
+        read -r -p "Workers [500]: " input_workers
+        [[ -n "$input_workers" ]] && scan_workers="$input_workers"
+        read -r -p "Timeout [2s]: " input_timeout
+        [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
+        read -r -p "Benchmark threshold % [50]: " input_threshold
+        [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
 
-      dnscan_args+=(
-        --country "$scan_country"
-        --mode "$scan_mode"
-        --workers "$scan_workers"
-        --threshold "$scan_threshold"
-        --timeout "$scan_timeout"
-      )
+        dnscan_args+=(
+          --country "$scan_country"
+          --mode "$scan_mode"
+          --workers "$scan_workers"
+          --threshold "$scan_threshold"
+          --timeout "$scan_timeout"
+        )
+      fi
     fi
-  fi
 
-  "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+    "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
 
-  # Check results (dnscan only outputs verified servers)
-  if [[ ! -s "$SERVERS_FILE" ]]; then
-    error "No DNS servers passed verification. Is your server running correctly?"
+    if [[ ! -s "$SERVERS_FILE" ]]; then
+      error "No DNS servers passed verification. Is your server running correctly?"
+    fi
   fi
 
   local server_count
   server_count=$(wc -l <"$SERVERS_FILE")
-  log "Found $server_count verified DNS servers"
+  log "Found $server_count resolver candidates"
 
-  # Pick best server by latency
-  local best_server best_latency
   read -r best_server best_latency <<<"$(find_best_server "$domain" "$SERVERS_FILE")"
-  [[ -n "$best_server" ]] || error "Could not choose a working DNS server from scan results"
+  [[ -n "$best_server" ]] || error "Could not choose a working DNS server"
   log "Using DNS server: $best_server (${best_latency}ms)"
+  if [[ "$best_latency" -ge 1000 ]]; then
+    warn "Selected resolver did not answer tunnel probe quickly (${best_latency}ms). You may need to switch resolver later."
+  fi
 
-  local bin_path="$SLIPSTREAM_CLIENT_BIN"
   local client_transport_port="$port"
   local ssh_pass_b64=""
   if [[ "$ssh_auth_client" == "true" ]]; then
@@ -2227,16 +2750,16 @@ cmd_client() {
   systemctl stop slipstream-client 2>/dev/null || true
   remove_ssh_client_service_if_present
 
-  # Install binary if not already in place
-  if [[ "$slipstream_bin" != "$bin_path" ]]; then
+  # Install binary if not already in place.
+  if [[ "$client_transport" == "slipstream" && -n "$slipstream_bin" && "$slipstream_bin" != "$SLIPSTREAM_CLIENT_BIN" ]]; then
     log "Installing slipstream-client..."
-    mv "$slipstream_bin" "$bin_path"
-    chmod +x "$bin_path"
+    mv "$slipstream_bin" "$SLIPSTREAM_CLIENT_BIN"
+    chmod +x "$SLIPSTREAM_CLIENT_BIN"
   fi
 
   # Create systemd service
   log "Creating systemd service..."
-  write_client_service "$best_server" "$domain" "$client_transport_port"
+  write_client_service "$best_server" "$domain" "$client_transport_port" "$client_transport" "$slipstream_cert" "$dnstt_pubkey"
 
   systemctl daemon-reload
   systemctl enable slipstream-client
@@ -2288,6 +2811,9 @@ SCAN_MODE=$scan_mode
 SCAN_WORKERS=$scan_workers
 SCAN_TIMEOUT=$scan_timeout
 SCAN_THRESHOLD=$scan_threshold
+DNSTM_TRANSPORT=$client_transport
+DNSTM_DNSTT_PUBKEY=$dnstt_pubkey
+DNSTM_SLIPSTREAM_CERT=$slipstream_cert
 SSH_AUTH_ENABLED=$ssh_auth_client
 SSH_AUTH_USER=$ssh_user
 SSH_PASS_B64=$ssh_pass_b64
@@ -2306,6 +2832,12 @@ EOF
   echo -e "${GREEN}=== Client Ready ===${NC}"
   echo ""
   echo "Tunnel: 127.0.0.1:$port"
+  echo "Transport: $client_transport"
+  if [[ "$client_transport" == "dnstt" ]]; then
+    echo "DNSTT pubkey: ${dnstt_pubkey:0:12}... (configured)"
+  elif [[ -n "$slipstream_cert" ]]; then
+    echo "Pinned cert: $slipstream_cert"
+  fi
   if [[ "$ssh_auth_client" == "true" ]]; then
     echo "Auth mode: SSH username/password overlay (user: $ssh_user)"
     echo "Internal slipstream transport port: $ssh_transport_port"
@@ -2437,20 +2969,24 @@ cmd_health() {
   fi
 
   # Test current server latency
-  echo "Testing DNS server: $CURRENT_SERVER"
+  local current_server="${CURRENT_SERVER:-}"
+  local current_domain="${DOMAIN:-}"
+  [[ -n "$current_server" ]] || error "No CURRENT_SERVER set in config"
+  [[ -n "$current_domain" ]] || error "No DOMAIN set in config"
+  echo "Testing DNS server: $current_server"
   local latency
-  latency=$(test_dns_latency "$CURRENT_SERVER" "$DOMAIN" || echo "9999")
+  latency=$(test_dns_latency "$current_server" "$current_domain" || echo "9999")
   echo "Latency: ${latency}ms"
 
   if [[ "$latency" -gt 1000 ]]; then
     echo "Server slow, checking alternatives..."
-    echo "[$timestamp] Current server $CURRENT_SERVER slow (${latency}ms), checking alternatives..." >>"$HEALTH_LOG"
+    echo "[$timestamp] Current server $current_server slow (${latency}ms), checking alternatives..." >>"$HEALTH_LOG"
 
     # Find better server
     local best_server best_latency
-    read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$SERVERS_FILE")"
+    read -r best_server best_latency <<<"$(find_best_server "$current_domain" "$SERVERS_FILE")"
 
-    if [[ -n "$best_server" && "$best_server" != "$CURRENT_SERVER" && "$best_latency" -lt 1000 ]]; then
+    if [[ -n "$best_server" && "$best_server" != "$current_server" && "$best_latency" -lt 1000 ]]; then
       echo "Switching to $best_server (${best_latency}ms)"
       echo "[$timestamp] Switching to $best_server (${best_latency}ms)" >>"$HEALTH_LOG"
 
@@ -2460,7 +2996,7 @@ cmd_health() {
       # Restart client with new server
       local transport_port
       transport_port=$(client_transport_port_from_config)
-      write_client_service "$best_server" "$DOMAIN" "$transport_port"
+      write_client_service "$best_server" "$current_domain" "$transport_port"
       systemctl daemon-reload
       if restart_client_stack; then
         echo "[$timestamp] Switched to $best_server" >>"$HEALTH_LOG"
@@ -2473,7 +3009,7 @@ cmd_health() {
     fi
   else
     echo "Server OK"
-    echo "[$timestamp] Server $CURRENT_SERVER OK (${latency}ms)" >>"$HEALTH_LOG"
+    echo "[$timestamp] Server $current_server OK (${latency}ms)" >>"$HEALTH_LOG"
   fi
 
   # Rotate log (keep last 1000 lines)
@@ -2489,39 +3025,52 @@ cmd_rescan() {
   check_dependencies dig systemctl wc head
   load_config_or_error
   [[ "${MODE:-}" == "client" ]] || error "Manual rescan applies only to client mode"
-  [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
-  [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || error "slipstream-client not installed"
 
   prompt_scan_settings_for_profile "$CONFIG_FILE" "$SERVERS_FILE"
   load_config_or_error
 
-  local dnscan_args=(
-    --domain "$DOMAIN"
-    --data-dir "$DNSCAN_DIR/data"
-    --output "$SERVERS_FILE"
-    --verify "$SLIPSTREAM_CLIENT_BIN"
-  )
-
+  local transport="${DNSTM_TRANSPORT:-slipstream}"
+  validate_transport_or_error "$transport"
   local scan_source="${SCAN_SOURCE:-generated}"
   local scan_file="${SCAN_DNS_FILE:-$SERVERS_FILE}"
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-50}"
 
-  if [[ "$scan_source" == "file" ]]; then
-    validate_dns_file_or_error "$scan_file"
-    dnscan_args+=(--file "$scan_file")
+  if [[ "$transport" == "dnstt" ]]; then
+    if [[ "$scan_source" == "file" ]]; then
+      validate_dns_file_or_error "$scan_file"
+      refresh_resolver_candidates_file "$DOMAIN" "$SERVERS_FILE" "$scan_file" "${CURRENT_SERVER:-}" \
+        || error "Manual rescan found no reachable DNS resolvers"
+    else
+      refresh_resolver_candidates_file "$DOMAIN" "$SERVERS_FILE" "" "${CURRENT_SERVER:-}" \
+        || error "Manual rescan found no reachable DNS resolvers"
+    fi
   else
-    dnscan_args+=(
-      --country "${SCAN_COUNTRY:-ir}"
-      --mode "${SCAN_MODE:-fast}"
+    [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
+    [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || error "slipstream-client not installed"
+    local dnscan_args=(
+      --domain "$DOMAIN"
+      --data-dir "$DNSCAN_DIR/data"
+      --output "$SERVERS_FILE"
+      --verify "$SLIPSTREAM_CLIENT_BIN"
     )
-  fi
-  dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
 
-  log "Running manual DNS rescan..."
-  "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
-  [[ -s "$SERVERS_FILE" ]] || error "Manual rescan found no verified DNS servers"
+    if [[ "$scan_source" == "file" ]]; then
+      validate_dns_file_or_error "$scan_file"
+      dnscan_args+=(--file "$scan_file")
+    else
+      dnscan_args+=(
+        --country "${SCAN_COUNTRY:-ir}"
+        --mode "${SCAN_MODE:-fast}"
+      )
+    fi
+    dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
+
+    log "Running manual DNS rescan..."
+    "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+    [[ -s "$SERVERS_FILE" ]] || error "Manual rescan found no verified DNS servers"
+  fi
 
   local best_server best_latency
   read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$SERVERS_FILE")"
@@ -2530,7 +3079,7 @@ cmd_rescan() {
   set_config_value "CURRENT_SERVER" "$best_server" "$CONFIG_FILE"
   local transport_port
   transport_port=$(client_transport_port_from_config)
-  write_client_service "$best_server" "$DOMAIN" "$transport_port"
+  write_client_service "$best_server" "$DOMAIN" "$transport_port" "$transport"
   systemctl daemon-reload
   restart_client_stack
 
@@ -2548,10 +3097,10 @@ cmd_dashboard() {
   echo "=== Client Dashboard ==="
   echo "Time: $now"
   echo ""
-  printf "%-12s %-8s %-10s %-10s %-10s %-6s %-15s %-8s %s\n" \
-    "Name" "Type" "Service" "Health" "Watchdog" "Port" "Resolver" "DNSms" "Domain"
+  printf "%-12s %-8s %-10s %-10s %-10s %-6s %-11s %-15s %-8s %s\n" \
+    "Name" "Type" "Service" "Health" "Watchdog" "Port" "Transport" "Resolver" "DNSms" "Domain"
 
-  local target cfg type service health_timer watchdog_timer domain port resolver state health_state watchdog_state latency
+  local target cfg type service health_timer watchdog_timer domain port resolver transport state health_state watchdog_state latency
   while IFS= read -r target; do
     [[ -n "$target" ]] || continue
     cfg=$(tunnel_config_file_for_target "$target")
@@ -2572,6 +3121,8 @@ cmd_dashboard() {
     watchdog_state=$(service_state "$watchdog_timer")
     domain=$(config_value_from_file "$cfg" "DOMAIN" || echo "-")
     port=$(config_value_from_file "$cfg" "PORT" || echo "-")
+    transport=$(config_value_from_file "$cfg" "DNSTM_TRANSPORT" || true)
+    [[ -n "$transport" ]] || transport="slipstream"
     resolver=$(config_value_from_file "$cfg" "CURRENT_SERVER" || true)
     [[ -n "$resolver" ]] || resolver="-"
     latency="-"
@@ -2579,8 +3130,8 @@ cmd_dashboard() {
       latency=$(test_dns_latency "$resolver" "$domain" || echo "9999")
     fi
 
-    printf "%-12s %-8s %-10s %-10s %-10s %-6s %-15s %-8s %s\n" \
-      "$target" "$type" "$state" "$health_state" "$watchdog_state" "$port" "$resolver" "$latency" "$domain"
+    printf "%-12s %-8s %-10s %-10s %-10s %-6s %-11s %-15s %-8s %s\n" \
+      "$target" "$type" "$state" "$health_state" "$watchdog_state" "$port" "$transport" "$resolver" "$latency" "$domain"
   done < <(collect_client_tunnel_targets)
 
   if [[ -f "$HEALTH_LOG" ]]; then
@@ -2605,22 +3156,22 @@ cmd_dashboard() {
 }
 
 ensure_instance_client_binary() {
-  if [[ -x "$SLIPSTREAM_CLIENT_BIN" ]]; then
-    return 0
+  local transport="${1:-slipstream}" dnstt_path="${2:-}"
+  validate_transport_or_error "$transport"
+  if [[ "$transport" == "dnstt" ]]; then
+    ensure_dnstt_client_binary "$dnstt_path"
+  else
+    ensure_slipstream_client_binary
   fi
-  local arch
-  arch=$(detect_arch)
-  log "slipstream-client binary not found; installing ${SLIPSTREAM_CORE} core..."
-  download_slipstream_component "client" "$SLIPSTREAM_CLIENT_BIN" "$arch" \
-    || error "Failed to download slipstream-client binary"
-  chmod +x "$SLIPSTREAM_CLIENT_BIN"
 }
 
 write_instance_client_service() {
-  local instance="$1" resolver="$2" domain="$3" port="$4"
+  local instance="$1" resolver="$2" domain="$3" port="$4" transport="${5:-${DNSTM_TRANSPORT:-slipstream}}"
+  local slipstream_cert="${6:-${DNSTM_SLIPSTREAM_CERT:-}}"
+  local dnstt_pubkey="${7:-${DNSTM_DNSTT_PUBKEY:-}}"
   local service_name
   service_name=$(instance_client_service "$instance")
-  write_client_service_named "$service_name" "$resolver" "$domain" "$port"
+  write_client_service_named "$service_name" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey"
 }
 
 setup_instance_timers() {
@@ -2673,8 +3224,11 @@ cmd_instance_add() {
   check_dependencies systemctl ss
   install_self
   enable_bbr_if_possible
+  load_config_or_error
+  [[ "${MODE:-}" == "client" ]] || error "Instance add is available only in client mode"
 
   local instance="${1:-}" domain="" port="7001" resolver="" input
+  local transport="slipstream" dnstt_pubkey="" slipstream_cert="" dnstt_client_path=""
   if [[ -z "$instance" ]]; then
     read -r -p "Instance name (e.g., dubai): " instance
   fi
@@ -2690,11 +3244,25 @@ cmd_instance_add() {
   [[ ! -f "$cfg" ]] || error "Instance already exists: $instance"
 
   ensure_service_user
-  ensure_instance_client_binary
 
   echo "=== Add Client Instance: $instance ==="
   read -r -p "Domain (e.g., f.example.com): " domain
   validate_domain_or_error "$domain"
+  if [[ "${SLIPSTREAM_CORE:-dnstm}" == "dnstm" ]]; then
+    read -r -p "Transport [slipstream/dnstt] [slipstream]: " input
+    [[ -n "$input" ]] && transport="$input"
+  fi
+  validate_transport_or_error "$transport"
+  if [[ "$transport" == "dnstt" ]]; then
+    read -r -p "DNSTT public key (64 hex chars): " dnstt_pubkey
+    validate_dnstt_pubkey_or_error "$dnstt_pubkey"
+    read -r -p "Local dnstt-client binary path (Enter to auto-download): " dnstt_client_path
+  else
+    read -r -p "Pinned slipstream cert path (Enter to skip): " slipstream_cert
+    [[ -z "$slipstream_cert" || -f "$slipstream_cert" ]] || error "Slipstream cert file not found: $slipstream_cert"
+  fi
+  ensure_instance_client_binary "$transport" "$dnstt_client_path"
+
   read -r -p "Local listen port [7001]: " input
   [[ -n "$input" ]] && port="$input"
   validate_port_or_error "$port"
@@ -2705,6 +3273,7 @@ cmd_instance_add() {
 
   mkdir -p "$instance_path"
   printf '%s\n' "$resolver" >"$servers_file"
+  refresh_resolver_candidates_file "$domain" "$servers_file" "" "$resolver" || true
   : >"$health_log"
   cat >"$cfg" <<EOF
 INSTANCE_NAME=$instance
@@ -2712,6 +3281,9 @@ MODE=client
 DOMAIN=$domain
 CURRENT_SERVER=$resolver
 PORT=$port
+DNSTM_TRANSPORT=$transport
+DNSTM_DNSTT_PUBKEY=$dnstt_pubkey
+DNSTM_SLIPSTREAM_CERT=$slipstream_cert
 SLIPSTREAM_CORE=$SLIPSTREAM_CORE
 SLIPSTREAM_REPO=$SLIPSTREAM_REPO
 SLIPSTREAM_VERSION=$SLIPSTREAM_VERSION
@@ -2729,9 +3301,9 @@ SSH_PASS_B64=
 SSH_REMOTE_APP_PORT=
 SSH_TRANSPORT_PORT=
 EOF
-  warn "Instance '$instance' uses direct slipstream mode (SSH auth overlay disabled)."
+  warn "Instance '$instance' uses transport '$transport' (SSH auth overlay disabled)."
 
-  write_instance_client_service "$instance" "$resolver" "$domain" "$port"
+  write_instance_client_service "$instance" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey"
   setup_instance_timers "$instance"
   systemctl daemon-reload
   start_instance_stack "$instance"
@@ -2748,7 +3320,7 @@ cmd_instance_list() {
   fi
 
   local any=false
-  local cfg instance status port resolver
+  local cfg instance status port resolver transport
   echo "=== Client Instances ==="
   for cfg in "$INSTANCES_DIR"/*/config; do
     [[ -f "$cfg" ]] || continue
@@ -2759,7 +3331,8 @@ cmd_instance_list() {
     status=$(service_state "$(instance_client_service "$instance")")
     port="${PORT:-unknown}"
     resolver="${CURRENT_SERVER:-unknown}"
-    printf "  %-16s service=%-10s port=%-6s resolver=%s\n" "$instance" "$status" "$port" "$resolver"
+    transport="${DNSTM_TRANSPORT:-slipstream}"
+    printf "  %-16s service=%-10s port=%-6s resolver=%-15s transport=%s\n" "$instance" "$status" "$port" "$resolver" "$transport"
   done
   if [[ "$any" == false ]]; then
     echo "No extra client instances configured."
@@ -2783,6 +3356,12 @@ cmd_instance_status() {
   echo "Domain: ${DOMAIN:-unknown}"
   echo "Port: ${PORT:-unknown}"
   echo "Current DNS: ${CURRENT_SERVER:-unknown}"
+  echo "Transport: ${DNSTM_TRANSPORT:-slipstream}"
+  if [[ "${DNSTM_TRANSPORT:-slipstream}" == "dnstt" ]]; then
+    [[ -n "${DNSTM_DNSTT_PUBKEY:-}" ]] && echo "DNSTT pubkey: ${DNSTM_DNSTT_PUBKEY:0:12}..."
+  elif [[ -n "${DNSTM_SLIPSTREAM_CERT:-}" ]]; then
+    echo "Pinned cert: ${DNSTM_SLIPSTREAM_CERT}"
+  fi
   echo "Core: ${SLIPSTREAM_CORE:-dnstm}"
   echo "Service: $(service_state "$service_name")"
   echo "Health timer: $(service_state "$health_timer")"
@@ -2941,8 +3520,6 @@ cmd_instance_rescan() {
   validate_instance_name_or_error "$instance"
   load_instance_config_or_error "$instance"
   [[ "${MODE:-}" == "client" ]] || error "Instance '$instance' is not in client mode"
-  [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
-  [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || error "slipstream-client not installed"
 
   local cfg servers_file
   cfg=$(instance_config_file "$instance")
@@ -2951,40 +3528,55 @@ cmd_instance_rescan() {
   prompt_scan_settings_for_profile "$cfg" "$servers_file"
   load_instance_config_or_error "$instance"
 
-  local dnscan_args=(
-    --domain "$DOMAIN"
-    --data-dir "$DNSCAN_DIR/data"
-    --output "$servers_file"
-    --verify "$SLIPSTREAM_CLIENT_BIN"
-  )
-
+  local transport="${DNSTM_TRANSPORT:-slipstream}"
+  validate_transport_or_error "$transport"
   local scan_source="${SCAN_SOURCE:-file}"
   local scan_file="${SCAN_DNS_FILE:-$servers_file}"
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-50}"
 
-  if [[ "$scan_source" == "file" ]]; then
-    validate_dns_file_or_error "$scan_file"
-    dnscan_args+=(--file "$scan_file")
+  if [[ "$transport" == "dnstt" ]]; then
+    if [[ "$scan_source" == "file" ]]; then
+      validate_dns_file_or_error "$scan_file"
+      refresh_resolver_candidates_file "$DOMAIN" "$servers_file" "$scan_file" "${CURRENT_SERVER:-}" \
+        || error "Manual rescan found no reachable DNS resolvers for instance '$instance'"
+    else
+      refresh_resolver_candidates_file "$DOMAIN" "$servers_file" "" "${CURRENT_SERVER:-}" \
+        || error "Manual rescan found no reachable DNS resolvers for instance '$instance'"
+    fi
   else
-    dnscan_args+=(
-      --country "${SCAN_COUNTRY:-ir}"
-      --mode "${SCAN_MODE:-fast}"
+    [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
+    [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || error "slipstream-client not installed"
+    local dnscan_args=(
+      --domain "$DOMAIN"
+      --data-dir "$DNSCAN_DIR/data"
+      --output "$servers_file"
+      --verify "$SLIPSTREAM_CLIENT_BIN"
     )
-  fi
-  dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
 
-  log "Running manual DNS rescan for instance '$instance'..."
-  "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
-  [[ -s "$servers_file" ]] || error "Manual rescan found no verified DNS servers for instance '$instance'"
+    if [[ "$scan_source" == "file" ]]; then
+      validate_dns_file_or_error "$scan_file"
+      dnscan_args+=(--file "$scan_file")
+    else
+      dnscan_args+=(
+        --country "${SCAN_COUNTRY:-ir}"
+        --mode "${SCAN_MODE:-fast}"
+      )
+    fi
+    dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
+
+    log "Running manual DNS rescan for instance '$instance'..."
+    "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+    [[ -s "$servers_file" ]] || error "Manual rescan found no verified DNS servers for instance '$instance'"
+  fi
 
   local best_server best_latency
   read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$servers_file")"
   [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan for '$instance'"
 
   set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
-  write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT"
+  write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT" "$transport"
   systemctl daemon-reload
   restart_instance_stack "$instance"
   log "Instance '$instance' switched to best DNS server: $best_server (${best_latency}ms)"
@@ -3001,22 +3593,35 @@ cmd_instance_edit() {
   [[ "${MODE:-}" == "client" ]] || error "Instance '$instance' is not in client mode"
 
   local cfg servers_file old_port new_domain new_port new_server
+  local new_transport new_dnstt_pubkey new_slipstream_cert
   cfg=$(instance_config_file "$instance")
   servers_file=$(instance_servers_file "$instance")
   old_port="${PORT:-7001}"
   new_domain="${DOMAIN:-}"
   new_port="${PORT:-7001}"
   new_server="${CURRENT_SERVER:-}"
+  new_transport="${DNSTM_TRANSPORT:-slipstream}"
+  new_dnstt_pubkey="${DNSTM_DNSTT_PUBKEY:-}"
+  new_slipstream_cert="${DNSTM_SLIPSTREAM_CERT:-}"
 
   echo "=== Edit Client Instance: $instance ==="
   read -r -p "Domain [$new_domain]: " input
   [[ -n "$input" ]] && new_domain="$input"
+  if [[ "${SLIPSTREAM_CORE:-dnstm}" == "dnstm" ]]; then
+    if [[ -t 0 ]]; then
+      read -r -p "Transport [slipstream/dnstt] [$new_transport]: " input
+      [[ -n "$input" ]] && new_transport="$input"
+    fi
+  else
+    new_transport="slipstream"
+  fi
   read -r -p "Local listen port [$new_port]: " input
   [[ -n "$input" ]] && new_port="$input"
   read -r -p "DNS resolver IP [$new_server]: " input
   [[ -n "$input" ]] && new_server="$input"
 
   validate_domain_or_error "$new_domain"
+  validate_transport_or_error "$new_transport"
   validate_port_or_error "$new_port"
   if [[ "$new_port" != "$old_port" ]] && port_in_use "$new_port"; then
     error "Port $new_port is already in use on this host"
@@ -3026,31 +3631,37 @@ cmd_instance_edit() {
   else
     validate_ipv4_or_error "$new_server"
   fi
+  if [[ "$new_transport" == "dnstt" ]]; then
+    read -r -p "DNSTT public key (64 hex chars) [$new_dnstt_pubkey]: " input
+    [[ -n "$input" ]] && new_dnstt_pubkey="$input"
+    validate_dnstt_pubkey_or_error "$new_dnstt_pubkey"
+    new_slipstream_cert=""
+    ensure_instance_client_binary "$new_transport"
+  else
+    read -r -p "Pinned slipstream cert path [$new_slipstream_cert] (Enter to keep/empty): " input
+    if [[ -n "$input" ]]; then
+      new_slipstream_cert="$input"
+    fi
+    [[ -z "$new_slipstream_cert" || -f "$new_slipstream_cert" ]] || error "Slipstream cert file not found: $new_slipstream_cert"
+    new_dnstt_pubkey=""
+    ensure_instance_client_binary "$new_transport"
+  fi
 
   mkdir -p "$(dirname "$servers_file")"
-  local tmp_servers
-  tmp_servers=$(mktemp /tmp/instance-servers.XXXXXX.txt)
-  {
-    echo "$new_server"
-    if [[ -f "$servers_file" ]]; then
-      while IFS= read -r input; do
-        [[ -n "$input" ]] || continue
-        is_valid_ipv4 "$input" || continue
-        [[ "$input" == "$new_server" ]] && continue
-        echo "$input"
-      done <"$servers_file"
-    fi
-  } >"$tmp_servers"
-  mv "$tmp_servers" "$servers_file"
+  printf '%s\n' "$new_server" >"$servers_file"
+  refresh_resolver_candidates_file "$new_domain" "$servers_file" "" "$new_server" || true
 
   set_config_value "DOMAIN" "$new_domain" "$cfg"
   set_config_value "PORT" "$new_port" "$cfg"
   set_config_value "CURRENT_SERVER" "$new_server" "$cfg"
+  set_config_value "DNSTM_TRANSPORT" "$new_transport" "$cfg"
+  set_config_value "DNSTM_DNSTT_PUBKEY" "$new_dnstt_pubkey" "$cfg"
+  set_config_value "DNSTM_SLIPSTREAM_CERT" "$new_slipstream_cert" "$cfg"
   if [[ "${SCAN_SOURCE:-file}" == "file" ]]; then
     set_config_value "SCAN_DNS_FILE" "$servers_file" "$cfg"
   fi
 
-  write_instance_client_service "$instance" "$new_server" "$new_domain" "$new_port"
+  write_instance_client_service "$instance" "$new_server" "$new_domain" "$new_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey"
   setup_instance_timers "$instance"
   systemctl daemon-reload
   restart_instance_stack "$instance"
@@ -3106,9 +3717,14 @@ cmd_instance_health() {
 
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  local current_server="${CURRENT_SERVER:-}"
+  local current_domain="${DOMAIN:-}"
+  local current_port="${PORT:-7000}"
+  [[ -n "$current_server" ]] || error "Instance '$instance' has no CURRENT_SERVER in config"
+  [[ -n "$current_domain" ]] || error "Instance '$instance' has no DOMAIN in config"
 
   local recover_reason=""
-  if recover_reason=$(client_recover_reason "6 minutes ago" "${PORT:-7000}" "$service_name"); then
+  if recover_reason=$(client_recover_reason "6 minutes ago" "$current_port" "$service_name"); then
     echo "[$timestamp] Self-heal triggered: $recover_reason" >>"$health_log"
     if restart_named_client_stack "$service_name"; then
       echo "[$timestamp] Self-heal restart completed" >>"$health_log"
@@ -3119,15 +3735,15 @@ cmd_instance_health() {
   fi
 
   local latency
-  latency=$(test_dns_latency "$CURRENT_SERVER" "$DOMAIN" || echo "9999")
+  latency=$(test_dns_latency "$current_server" "$current_domain" || echo "9999")
   if [[ "$latency" -gt 1000 ]]; then
-    echo "[$timestamp] Current server $CURRENT_SERVER slow (${latency}ms), checking alternatives..." >>"$health_log"
+    echo "[$timestamp] Current server $current_server slow (${latency}ms), checking alternatives..." >>"$health_log"
     if [[ -f "$servers_file" ]]; then
       local best_server best_latency
-      read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$servers_file" || true)"
-      if [[ -n "$best_server" && "$best_server" != "$CURRENT_SERVER" && "$best_latency" -lt 1000 ]]; then
+      read -r best_server best_latency <<<"$(find_best_server "$current_domain" "$servers_file" || true)"
+      if [[ -n "$best_server" && "$best_server" != "$current_server" && "$best_latency" -lt 1000 ]]; then
         set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
-        write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT"
+        write_instance_client_service "$instance" "$best_server" "$current_domain" "$current_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}"
         systemctl daemon-reload
         if restart_named_client_stack "$service_name"; then
           echo "[$timestamp] Switched to $best_server (${best_latency}ms)" >>"$health_log"
@@ -3139,7 +3755,7 @@ cmd_instance_health() {
       fi
     fi
   else
-    echo "[$timestamp] Server $CURRENT_SERVER OK (${latency}ms)" >>"$health_log"
+    echo "[$timestamp] Server $current_server OK (${latency}ms)" >>"$health_log"
   fi
 
   if [[ $(wc -l <"$health_log") -gt 1000 ]]; then
@@ -3285,7 +3901,13 @@ cmd_select_server() {
 
 service_name_for_mode() {
   case "${MODE:-}" in
-  server) echo "slipstream-server" ;;
+  server)
+    if [[ "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+      echo "dnstm-router"
+    else
+      echo "slipstream-server"
+    fi
+    ;;
   client) echo "slipstream-client" ;;
   *) error "Unsupported mode in config: ${MODE:-unknown}" ;;
   esac
@@ -3307,6 +3929,8 @@ cmd_start() {
   service_name=$(service_name_for_mode)
   if [[ "${MODE:-}" == "client" ]]; then
     start_client_stack
+  elif [[ "${MODE:-}" == "server" && "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+    run_dnstm router start
   else
     systemctl start "$service_name"
   fi
@@ -3329,6 +3953,8 @@ cmd_stop() {
   service_name=$(service_name_for_mode)
   if [[ "${MODE:-}" == "client" ]]; then
     stop_client_stack
+  elif [[ "${MODE:-}" == "server" && "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+    run_dnstm router stop
   else
     systemctl stop "$service_name"
   fi
@@ -3358,6 +3984,8 @@ cmd_restart() {
   service_name=$(service_name_for_mode)
   if [[ "${MODE:-}" == "client" ]]; then
     restart_client_stack
+  elif [[ "${MODE:-}" == "server" && "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+    run_dnstm router restart
   else
     systemctl restart "$service_name"
   fi
@@ -3391,12 +4019,21 @@ cmd_edit_client() {
   local new_ssh_pass_b64="${SSH_PASS_B64:-}"
   local new_ssh_remote_port="${SSH_REMOTE_APP_PORT:-2053}"
   local new_ssh_transport_port="${SSH_TRANSPORT_PORT:-17070}"
+  local new_transport="${DNSTM_TRANSPORT:-slipstream}"
+  local new_dnstt_pubkey="${DNSTM_DNSTT_PUBKEY:-}"
+  local new_slipstream_cert="${DNSTM_SLIPSTREAM_CERT:-}"
   local new_ssh_pass_plain=""
   local input=""
 
   echo "=== Edit Client Settings ==="
   read -r -p "Domain [$new_domain]: " input
   [[ -n "$input" ]] && new_domain="$input"
+  if [[ "${SLIPSTREAM_CORE:-dnstm}" == "dnstm" ]]; then
+    read -r -p "Transport [slipstream/dnstt] [$new_transport]: " input
+    [[ -n "$input" ]] && new_transport="$input"
+  else
+    new_transport="slipstream"
+  fi
   read -r -p "Tunnel listen port [$new_port]: " input
   [[ -n "$input" ]] && new_port="$input"
   read -r -p "DNS resolver IP [$new_server]: " input
@@ -3414,6 +4051,7 @@ cmd_edit_client() {
   fi
 
   validate_domain_or_error "$new_domain"
+  validate_transport_or_error "$new_transport"
   validate_port_or_error "$new_port"
   if [[ -n "$new_server" ]]; then
     validate_ipv4_or_error "$new_server"
@@ -3421,6 +4059,25 @@ cmd_edit_client() {
     read -r new_server _ <<<"$(find_best_server "$new_domain" "$SERVERS_FILE")"
   fi
   [[ -n "$new_server" ]] || error "No DNS resolver available. Run 'slipstream-tunnel rescan' first."
+  if [[ "$new_transport" == "dnstt" ]]; then
+    if [[ -t 0 ]]; then
+      read -r -p "DNSTT public key (64 hex chars) [$new_dnstt_pubkey]: " input
+      [[ -n "$input" ]] && new_dnstt_pubkey="$input"
+    fi
+    validate_dnstt_pubkey_or_error "$new_dnstt_pubkey"
+    new_slipstream_cert=""
+    ensure_dnstt_client_binary
+  else
+    if [[ -t 0 ]]; then
+      read -r -p "Pinned slipstream cert path [$new_slipstream_cert] (Enter to keep/empty): " input
+      if [[ -n "$input" ]]; then
+        new_slipstream_cert="$input"
+      fi
+    fi
+    [[ -z "$new_slipstream_cert" || -f "$new_slipstream_cert" ]] || error "Slipstream cert file not found: $new_slipstream_cert"
+    new_dnstt_pubkey=""
+    ensure_slipstream_client_binary
+  fi
 
   if [[ "$new_ssh_auth" == "true" ]]; then
     check_dependencies ssh sshpass base64
@@ -3445,7 +4102,7 @@ cmd_edit_client() {
   fi
 
   if [[ "$new_ssh_auth" == "true" ]]; then
-    write_client_service "$new_server" "$new_domain" "$new_ssh_transport_port"
+    write_client_service "$new_server" "$new_domain" "$new_ssh_transport_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey"
     systemctl daemon-reload
     systemctl restart slipstream-client
     systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
@@ -3466,6 +4123,9 @@ cmd_edit_client() {
     set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
     set_config_value "PORT" "$new_port" "$CONFIG_FILE"
     set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
+    set_config_value "DNSTM_TRANSPORT" "$new_transport" "$CONFIG_FILE"
+    set_config_value "DNSTM_DNSTT_PUBKEY" "$new_dnstt_pubkey" "$CONFIG_FILE"
+    set_config_value "DNSTM_SLIPSTREAM_CERT" "$new_slipstream_cert" "$CONFIG_FILE"
     set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
     set_config_value "SSH_AUTH_USER" "$new_ssh_user" "$CONFIG_FILE"
     set_config_value "SSH_PASS_B64" "$new_ssh_pass_b64" "$CONFIG_FILE"
@@ -3483,7 +4143,10 @@ cmd_edit_client() {
     set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
     set_config_value "PORT" "$new_port" "$CONFIG_FILE"
     set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
-    write_client_service "$new_server" "$new_domain" "$new_port"
+    set_config_value "DNSTM_TRANSPORT" "$new_transport" "$CONFIG_FILE"
+    set_config_value "DNSTM_DNSTT_PUBKEY" "$new_dnstt_pubkey" "$CONFIG_FILE"
+    set_config_value "DNSTM_SLIPSTREAM_CERT" "$new_slipstream_cert" "$CONFIG_FILE"
+    write_client_service "$new_server" "$new_domain" "$new_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey"
     remove_ssh_client_service_if_present
     SSH_AUTH_ENABLED="false"
   fi
@@ -3504,6 +4167,79 @@ cmd_edit_server() {
   enable_bbr_if_possible
   load_config_or_error
   [[ "${MODE:-}" == "server" ]] || error "Server edit is available only in server mode"
+
+  if [[ "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+    local new_domain="${DOMAIN:-}"
+    local new_port="${PORT:-2053}"
+    local new_transport="${DNSTM_TRANSPORT:-slipstream}"
+    local new_backend_type="${DNSTM_BACKEND_TYPE:-custom}"
+    local new_backend_tag="${DNSTM_BACKEND_TAG:-app-main}"
+    local new_tunnel_tag="${DNSTM_TUNNEL_TAG:-main}"
+    local new_router_mode="${DNSTM_MODE:-single}"
+    local new_ss_password=""
+    local new_ss_method="aes-256-gcm"
+    local input=""
+
+    echo "=== Edit Server Settings (dnstm native) ==="
+    read -r -p "Domain [$new_domain]: " input
+    [[ -n "$input" ]] && new_domain="$input"
+    read -r -p "dnstm router mode [single/multi] [$new_router_mode]: " input
+    [[ -n "$input" ]] && new_router_mode="$input"
+    read -r -p "Tunnel transport [slipstream/dnstt] [$new_transport]: " input
+    [[ -n "$input" ]] && new_transport="$input"
+    read -r -p "Backend type [custom/socks/ssh/shadowsocks] [$new_backend_type]: " input
+    [[ -n "$input" ]] && new_backend_type="$input"
+
+    case "$new_backend_type" in
+    custom)
+      read -r -p "Protected app port for custom backend [$new_port]: " input
+      [[ -n "$input" ]] && new_port="$input"
+      ;;
+    shadowsocks)
+      read -r -p "Shadowsocks method [$new_ss_method]: " input
+      [[ -n "$input" ]] && new_ss_method="$input"
+      read -r -p "Shadowsocks password (Enter to auto-generate): " input
+      [[ -n "$input" ]] && new_ss_password="$input"
+      ;;
+    esac
+
+    read -r -p "Backend tag [$new_backend_tag]: " input
+    [[ -n "$input" ]] && new_backend_tag="$input"
+    read -r -p "Tunnel tag [$new_tunnel_tag]: " input
+    [[ -n "$input" ]] && new_tunnel_tag="$input"
+
+    validate_domain_or_error "$new_domain"
+    validate_port_or_error "$new_port"
+    dnstm_validate_transport_or_error "$new_transport"
+    dnstm_validate_backend_type_or_error "$new_backend_type"
+    [[ "$new_router_mode" == "single" || "$new_router_mode" == "multi" ]] \
+      || error "Invalid dnstm mode: $new_router_mode (use single or multi)"
+    if [[ "$new_transport" == "dnstt" && "$new_backend_type" == "shadowsocks" ]]; then
+      error "DNSTT transport does not support shadowsocks backend"
+    fi
+    case "$new_backend_type" in
+    socks) new_backend_tag="socks" ;;
+    ssh) new_backend_tag="ssh" ;;
+    esac
+
+    ensure_dnstm_binary
+    dnstm_setup_server_stack "$new_domain" "$new_port" "$new_transport" "$new_backend_type" "$new_backend_tag" "$new_tunnel_tag" "$new_router_mode" "$new_ss_password" "$new_ss_method"
+
+    set_config_value "DOMAIN" "$new_domain" "$CONFIG_FILE"
+    set_config_value "PORT" "$new_port" "$CONFIG_FILE"
+    set_config_value "DNSTM_MODE" "$new_router_mode" "$CONFIG_FILE"
+    set_config_value "DNSTM_TRANSPORT" "$new_transport" "$CONFIG_FILE"
+    set_config_value "DNSTM_BACKEND_TYPE" "$new_backend_type" "$CONFIG_FILE"
+    set_config_value "DNSTM_BACKEND_TAG" "$new_backend_tag" "$CONFIG_FILE"
+    set_config_value "DNSTM_TUNNEL_TAG" "$new_tunnel_tag" "$CONFIG_FILE"
+    set_config_value "DNSTM_BACKEND_ADDRESS" "$(dnstm_backend_address_for_type "$new_backend_type" "$new_port")" "$CONFIG_FILE"
+    set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
+    set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
+
+    log "dnstm native server settings updated."
+    cmd_status
+    return 0
+  fi
 
   local new_domain="${DOMAIN:-}"
   local new_port="${PORT:-2053}"
@@ -3839,19 +4575,78 @@ cmd_core_switch() {
   log "Source: ${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION} (${SLIPSTREAM_ASSET_LAYOUT})"
 
   if [[ "${MODE:-}" == "server" ]]; then
-    systemctl stop slipstream-server 2>/dev/null || true
-    download_slipstream_component "server" "$SLIPSTREAM_SERVER_BIN" "$arch" \
-      || error "Failed to download server binary for core '${target_core}'"
-    chmod +x "$SLIPSTREAM_SERVER_BIN"
-    systemctl daemon-reload
-    systemctl restart slipstream-server
+    if [[ "$target_core" == "dnstm" ]]; then
+      local dnstm_transport dnstm_backend dnstm_backend_tag dnstm_tunnel_tag dnstm_mode dnstm_ss_password dnstm_ss_method
+      dnstm_transport="${DNSTM_TRANSPORT:-slipstream}"
+      dnstm_backend="${DNSTM_BACKEND_TYPE:-custom}"
+      dnstm_backend_tag="${DNSTM_BACKEND_TAG:-app-main}"
+      dnstm_tunnel_tag="${DNSTM_TUNNEL_TAG:-main}"
+      dnstm_mode="${DNSTM_MODE:-single}"
+      dnstm_ss_password=""
+      dnstm_ss_method="aes-256-gcm"
+      case "$dnstm_backend" in
+      socks) dnstm_backend_tag="socks" ;;
+      ssh) dnstm_backend_tag="ssh" ;;
+      esac
+
+      ensure_dnstm_binary
+      dnstm_setup_server_stack "$DOMAIN" "${PORT:-2053}" "$dnstm_transport" "$dnstm_backend" "$dnstm_backend_tag" "$dnstm_tunnel_tag" "$dnstm_mode" "$dnstm_ss_password" "$dnstm_ss_method"
+      set_config_value "DNSTM_REPO" "$DNSTM_REPO" "$CONFIG_FILE"
+      set_config_value "DNSTM_VERSION" "$DNSTM_VERSION" "$CONFIG_FILE"
+      set_config_value "DNSTM_MODE" "$dnstm_mode" "$CONFIG_FILE"
+      set_config_value "DNSTM_TRANSPORT" "$dnstm_transport" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_TYPE" "$dnstm_backend" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_TAG" "$dnstm_backend_tag" "$CONFIG_FILE"
+      set_config_value "DNSTM_TUNNEL_TAG" "$dnstm_tunnel_tag" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_ADDRESS" "$(dnstm_backend_address_for_type "$dnstm_backend" "${PORT:-2053}")" "$CONFIG_FILE"
+      set_config_value "SSH_AUTH_ENABLED" "false" "$CONFIG_FILE"
+      set_config_value "SSH_BACKEND_PORT" "" "$CONFIG_FILE"
+    else
+      if [[ "$current_core" == "dnstm" ]] && dnstm_is_installed; then
+        run_dnstm router stop >/dev/null 2>&1 || true
+      fi
+      systemctl stop slipstream-server 2>/dev/null || true
+      download_slipstream_component "server" "$SLIPSTREAM_SERVER_BIN" "$arch" \
+        || error "Failed to download server binary for core '${target_core}'"
+      chmod +x "$SLIPSTREAM_SERVER_BIN"
+      systemctl daemon-reload
+      systemctl restart slipstream-server
+    fi
   elif [[ "${MODE:-}" == "client" ]]; then
+    local client_transport="${DNSTM_TRANSPORT:-slipstream}"
+    local client_pubkey="${DNSTM_DNSTT_PUBKEY:-}"
+    local client_cert="${DNSTM_SLIPSTREAM_CERT:-}"
+    local resolver="${CURRENT_SERVER:-}"
+    local domain="${DOMAIN:-}"
+    local listen_port
+    listen_port=$(client_transport_port_from_config)
+
+    if [[ "$target_core" != "dnstm" ]]; then
+      client_transport="slipstream"
+      client_pubkey=""
+    fi
+    validate_transport_or_error "$client_transport"
+    if [[ "$client_transport" == "dnstt" && -z "$client_pubkey" ]]; then
+      warn "DNSTT transport selected but no DNSTT public key is saved. Falling back to slipstream."
+      client_transport="slipstream"
+    fi
+
     download_slipstream_component "client" "$SLIPSTREAM_CLIENT_BIN" "$arch" \
       || error "Failed to download client binary for core '${target_core}'"
     chmod +x "$SLIPSTREAM_CLIENT_BIN"
     # Keep verifier binary in sync.
     cp "$SLIPSTREAM_CLIENT_BIN" "$TUNNEL_DIR/slipstream-client" 2>/dev/null || true
     chmod +x "$TUNNEL_DIR/slipstream-client" 2>/dev/null || true
+    if [[ "$client_transport" == "dnstt" ]]; then
+      ensure_dnstt_client_binary
+    fi
+    if [[ -n "$resolver" && -n "$domain" ]]; then
+      write_client_service "$resolver" "$domain" "$listen_port" "$client_transport" "$client_cert" "$client_pubkey"
+      systemctl daemon-reload
+    fi
+    set_config_value "DNSTM_TRANSPORT" "$client_transport" "$CONFIG_FILE"
+    set_config_value "DNSTM_DNSTT_PUBKEY" "$client_pubkey" "$CONFIG_FILE"
+    set_config_value "DNSTM_SLIPSTREAM_CERT" "$client_cert" "$CONFIG_FILE"
     restart_client_stack
   else
     error "Unsupported mode in config: ${MODE:-unknown}"
@@ -3861,15 +4656,60 @@ cmd_core_switch() {
   set_config_value "SLIPSTREAM_REPO" "$SLIPSTREAM_REPO" "$CONFIG_FILE"
   set_config_value "SLIPSTREAM_VERSION" "$SLIPSTREAM_VERSION" "$CONFIG_FILE"
   set_config_value "SLIPSTREAM_ASSET_LAYOUT" "$SLIPSTREAM_ASSET_LAYOUT" "$CONFIG_FILE"
+  if [[ "${MODE:-}" == "server" ]]; then
+    if [[ "$target_core" == "dnstm" ]]; then
+      set_config_value "DNSTM_REPO" "$DNSTM_REPO" "$CONFIG_FILE"
+      set_config_value "DNSTM_VERSION" "$DNSTM_VERSION" "$CONFIG_FILE"
+    else
+      set_config_value "DNSTM_MODE" "" "$CONFIG_FILE"
+      set_config_value "DNSTM_TRANSPORT" "" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_TYPE" "" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_TAG" "" "$CONFIG_FILE"
+      set_config_value "DNSTM_TUNNEL_TAG" "" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_ADDRESS" "" "$CONFIG_FILE"
+    fi
+  fi
 
   if [[ "${MODE:-}" == "client" && -d "$INSTANCES_DIR" ]]; then
-    local icfg
+    local icfg instance_name instance_domain instance_resolver instance_port instance_transport instance_pubkey instance_cert
+    local -a instances_to_restart=()
     for icfg in "$INSTANCES_DIR"/*/config; do
       [[ -f "$icfg" ]] || continue
+      instance_name=$(basename "$(dirname "$icfg")")
       set_config_value "SLIPSTREAM_CORE" "$SLIPSTREAM_CORE" "$icfg"
       set_config_value "SLIPSTREAM_REPO" "$SLIPSTREAM_REPO" "$icfg"
       set_config_value "SLIPSTREAM_VERSION" "$SLIPSTREAM_VERSION" "$icfg"
       set_config_value "SLIPSTREAM_ASSET_LAYOUT" "$SLIPSTREAM_ASSET_LAYOUT" "$icfg"
+
+      instance_domain=$(config_value_from_file "$icfg" "DOMAIN" || true)
+      instance_resolver=$(config_value_from_file "$icfg" "CURRENT_SERVER" || true)
+      instance_port=$(config_value_from_file "$icfg" "PORT" || true)
+      instance_transport=$(config_value_from_file "$icfg" "DNSTM_TRANSPORT" || true)
+      instance_pubkey=$(config_value_from_file "$icfg" "DNSTM_DNSTT_PUBKEY" || true)
+      instance_cert=$(config_value_from_file "$icfg" "DNSTM_SLIPSTREAM_CERT" || true)
+      [[ -n "$instance_transport" ]] || instance_transport="slipstream"
+
+      if [[ "$target_core" != "dnstm" ]]; then
+        instance_transport="slipstream"
+        instance_pubkey=""
+      elif [[ "$instance_transport" == "dnstt" && -z "$instance_pubkey" ]]; then
+        warn "Instance '$instance_name' has DNSTT transport without pubkey. Falling back to slipstream."
+        instance_transport="slipstream"
+      fi
+      set_config_value "DNSTM_TRANSPORT" "$instance_transport" "$icfg"
+      set_config_value "DNSTM_DNSTT_PUBKEY" "$instance_pubkey" "$icfg"
+      set_config_value "DNSTM_SLIPSTREAM_CERT" "$instance_cert" "$icfg"
+
+      if [[ -n "$instance_domain" && -n "$instance_resolver" && -n "$instance_port" ]]; then
+        write_instance_client_service "$instance_name" "$instance_resolver" "$instance_domain" "$instance_port" "$instance_transport" "$instance_cert" "$instance_pubkey"
+        setup_instance_timers "$instance_name"
+        instances_to_restart+=("$instance_name")
+      fi
+    done
+    systemctl daemon-reload
+    local restart_instance
+    for restart_instance in "${instances_to_restart[@]}"; do
+      restart_instance_stack "$restart_instance"
     done
   fi
 
@@ -3960,6 +4800,22 @@ cmd_auth_list() {
   done <<<"$users"
 }
 
+ensure_mode_server_dnstm_or_error() {
+  ensure_mode_server_or_error
+  [[ "${SLIPSTREAM_CORE:-}" == "dnstm" ]] || error "This action is available only when server core is 'dnstm'"
+  dnstm_is_installed || error "dnstm binary is missing: $DNSTM_BIN"
+}
+
+cmd_dnstm_passthrough() {
+  need_root
+  ensure_mode_server_dnstm_or_error
+  if [[ $# -eq 0 ]]; then
+    "$DNSTM_BIN"
+  else
+    "$DNSTM_BIN" "$@"
+  fi
+}
+
 prompt_instance_name_from_menu() {
   local instance=""
   read -r -p "Instance name: " instance
@@ -4004,9 +4860,9 @@ cmd_tunnels_overview() {
   ensure_mode_client_or_error
 
   echo "=== Tunnel Overview ==="
-  printf "%-12s %-8s %-10s %-6s %-15s %s\n" "Name" "Type" "Service" "Port" "Resolver" "Domain"
+  printf "%-12s %-8s %-10s %-6s %-11s %-15s %s\n" "Name" "Type" "Service" "Port" "Transport" "Resolver" "Domain"
 
-  local target cfg service type state domain port resolver
+  local target cfg service type state domain port resolver transport
   while IFS= read -r target; do
     [[ -n "$target" ]] || continue
     cfg=$(tunnel_config_file_for_target "$target")
@@ -4015,6 +4871,8 @@ cmd_tunnels_overview() {
     state=$(service_state "$service")
     domain=$(config_value_from_file "$cfg" "DOMAIN" || echo "unknown")
     port=$(config_value_from_file "$cfg" "PORT" || echo "unknown")
+    transport=$(config_value_from_file "$cfg" "DNSTM_TRANSPORT" || true)
+    [[ -n "$transport" ]] || transport="slipstream"
     resolver=$(config_value_from_file "$cfg" "CURRENT_SERVER" || true)
     [[ -n "$resolver" ]] || resolver="-"
     if [[ "$target" == "default" ]]; then
@@ -4022,13 +4880,13 @@ cmd_tunnels_overview() {
     else
       type="extra"
     fi
-    printf "%-12s %-8s %-10s %-6s %-15s %s\n" "$target" "$type" "$state" "$port" "$resolver" "$domain"
+    printf "%-12s %-8s %-10s %-6s %-11s %-15s %s\n" "$target" "$type" "$state" "$port" "$transport" "$resolver" "$domain"
   done < <(collect_client_tunnel_targets)
 }
 
 prompt_tunnel_target_from_menu() {
   local include_default="${1:-true}"
-  local targets=() target cfg service state port resolver
+  local targets=() target cfg service state port resolver transport
 
   while IFS= read -r target; do
     [[ -n "$target" ]] || continue
@@ -4050,9 +4908,11 @@ prompt_tunnel_target_from_menu() {
     service=$(tunnel_service_name_for_target "$target")
     state=$(service_state "$service")
     port=$(config_value_from_file "$cfg" "PORT" || echo "unknown")
+    transport=$(config_value_from_file "$cfg" "DNSTM_TRANSPORT" || true)
+    [[ -n "$transport" ]] || transport="slipstream"
     resolver=$(config_value_from_file "$cfg" "CURRENT_SERVER" || true)
     [[ -n "$resolver" ]] || resolver="-"
-    printf " %2d) %-12s service=%-10s port=%-6s resolver=%s\n" "$i" "$target" "$state" "$port" "$resolver" >&2
+    printf " %2d) %-12s service=%-10s port=%-6s transport=%-10s resolver=%s\n" "$i" "$target" "$state" "$port" "$transport" "$resolver" >&2
     i=$((i + 1))
   done
   echo "  0) Cancel" >&2
@@ -4388,6 +5248,41 @@ cmd_menu_client_service() {
   done
 }
 
+cmd_menu_client_dnstm() {
+  while true; do
+    echo ""
+    echo "=== Client DNSTM Submenu ==="
+    echo "1) Show all tunnels overview (with transport)"
+    echo "2) Edit one tunnel transport/profile"
+    echo "3) Run DNS rescan for one tunnel"
+    echo "4) Show one tunnel status"
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    local target=""
+    case "$choice" in
+    1) cmd_tunnels_overview ;;
+    2)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_edit "$target"
+      fi
+      ;;
+    3)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_rescan "$target"
+      fi
+      ;;
+    4)
+      if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_status "$target"
+      fi
+      ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
 cmd_menu_client_auth() {
   while true; do
     echo ""
@@ -4399,6 +5294,7 @@ cmd_menu_client_auth() {
     echo "5) Show speed profile status (main tunnel)"
     echo "6) Switch core (dnstm/nightowl/plus, shared client binary)"
     echo "7) Edit one tunnel settings (main + instances)"
+    echo "8) DNSTM transport/profile submenu (all tunnels)"
     echo "0) Back"
     read -r -p "Select: " choice
 
@@ -4415,6 +5311,203 @@ cmd_menu_client_auth() {
         cmd_tunnel_edit "$target"
       fi
       ;;
+    8) cmd_menu_client_dnstm ;;
+    0) break ;;
+    *) warn "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+cmd_menu_server_dnstm() {
+  ensure_mode_server_dnstm_or_error
+  while true; do
+    echo ""
+    echo "=== Server Native DNSTM Submenu ==="
+    echo "1) Router status"
+    echo "2) Router start/restart"
+    echo "3) Router stop"
+    echo "4) Router logs (last 120 lines)"
+    echo "5) Switch router mode (single/multi)"
+    echo "6) Switch active tunnel (single mode)"
+    echo "7) List tunnels"
+    echo "8) Add tunnel"
+    echo "9) Tunnel status"
+    echo "10) Tunnel logs"
+    echo "11) Tunnel start"
+    echo "12) Tunnel stop"
+    echo "13) Tunnel restart"
+    echo "14) Tunnel remove"
+    echo "15) List backends"
+    echo "16) Available backend types"
+    echo "17) Add custom backend"
+    echo "18) Add shadowsocks backend"
+    echo "19) Backend status"
+    echo "20) Backend remove"
+    echo "21) SSH users manager"
+    echo "22) Run dnstm update --force"
+    echo "0) Back"
+    read -r -p "Select: " choice
+
+    local tag="" mode="" transport="" backend="" domain="" port="" mtu="" address="" password="" method=""
+    case "$choice" in
+    1) run_dnstm router status ;;
+    2) run_dnstm router start ;;
+    3) run_dnstm router stop ;;
+    4) run_dnstm router logs -n 120 ;;
+    5)
+      read -r -p "Router mode [single/multi]: " mode
+      [[ "$mode" == "single" || "$mode" == "multi" ]] || {
+        warn "Invalid mode: $mode"
+        continue
+      }
+      run_dnstm router mode "$mode"
+      set_config_value "DNSTM_MODE" "$mode" "$CONFIG_FILE"
+      ;;
+    6)
+      read -r -p "Tunnel tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Tunnel tag is required"
+        continue
+      }
+      run_dnstm router switch -t "$tag"
+      set_config_value "DNSTM_TUNNEL_TAG" "$tag" "$CONFIG_FILE"
+      ;;
+    7) run_dnstm tunnel list ;;
+    8)
+      read -r -p "Transport [slipstream/dnstt]: " transport
+      [[ "$transport" == "slipstream" || "$transport" == "dnstt" ]] || {
+        warn "Invalid transport: $transport"
+        continue
+      }
+      read -r -p "Backend tag: " backend
+      [[ -n "$backend" ]] || {
+        warn "Backend tag is required"
+        continue
+      }
+      read -r -p "Domain: " domain
+      [[ -n "$domain" ]] || {
+        warn "Domain is required"
+        continue
+      }
+      validate_domain_or_error "$domain"
+      read -r -p "Tunnel tag (Enter for auto): " tag
+      read -r -p "Internal tunnel port (Enter for auto): " port
+      read -r -p "MTU (dnstt only, Enter for default): " mtu
+      local add_args=(tunnel add --transport "$transport" --backend "$backend" --domain "$domain")
+      [[ -n "$tag" ]] && add_args+=(-t "$tag")
+      [[ -n "$port" ]] && add_args+=(-p "$port")
+      [[ -n "$mtu" ]] && add_args+=(--mtu "$mtu")
+      run_dnstm "${add_args[@]}"
+      [[ -n "$tag" ]] && set_config_value "DNSTM_TUNNEL_TAG" "$tag" "$CONFIG_FILE"
+      set_config_value "DNSTM_TRANSPORT" "$transport" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_TAG" "$backend" "$CONFIG_FILE"
+      ;;
+    9)
+      read -r -p "Tunnel tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Tunnel tag is required"
+        continue
+      }
+      run_dnstm tunnel status -t "$tag"
+      ;;
+    10)
+      read -r -p "Tunnel tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Tunnel tag is required"
+        continue
+      }
+      run_dnstm tunnel logs -t "$tag" -n 120
+      ;;
+    11)
+      read -r -p "Tunnel tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Tunnel tag is required"
+        continue
+      }
+      run_dnstm tunnel start -t "$tag"
+      ;;
+    12)
+      read -r -p "Tunnel tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Tunnel tag is required"
+        continue
+      }
+      run_dnstm tunnel stop -t "$tag"
+      ;;
+    13)
+      read -r -p "Tunnel tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Tunnel tag is required"
+        continue
+      }
+      run_dnstm tunnel restart -t "$tag"
+      ;;
+    14)
+      read -r -p "Tunnel tag to remove: " tag
+      [[ -n "$tag" ]] || {
+        warn "Tunnel tag is required"
+        continue
+      }
+      read -r -p "Confirm remove tunnel '$tag' (y/n): " confirm_remove
+      [[ "$confirm_remove" == "y" ]] || continue
+      run_dnstm tunnel remove -t "$tag" --force
+      ;;
+    15) run_dnstm backend list ;;
+    16) run_dnstm backend available ;;
+    17)
+      read -r -p "Backend tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Backend tag is required"
+        continue
+      }
+      read -r -p "Custom target address (host:port): " address
+      [[ -n "$address" ]] || {
+        warn "Address is required"
+        continue
+      }
+      run_dnstm backend add --type custom -t "$tag" --address "$address"
+      set_config_value "DNSTM_BACKEND_TAG" "$tag" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_TYPE" "custom" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_ADDRESS" "$address" "$CONFIG_FILE"
+      ;;
+    18)
+      read -r -p "Backend tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Backend tag is required"
+        continue
+      }
+      read -r -p "Method [aes-256-gcm]: " method
+      method="${method:-aes-256-gcm}"
+      read -r -p "Password (Enter to auto-generate): " password
+      if [[ -n "$password" ]]; then
+        run_dnstm backend add --type shadowsocks -t "$tag" --method "$method" --password "$password"
+      else
+        run_dnstm backend add --type shadowsocks -t "$tag" --method "$method"
+      fi
+      set_config_value "DNSTM_BACKEND_TAG" "$tag" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_TYPE" "shadowsocks" "$CONFIG_FILE"
+      set_config_value "DNSTM_BACKEND_ADDRESS" "managed-by-dnstm" "$CONFIG_FILE"
+      ;;
+    19)
+      read -r -p "Backend tag: " tag
+      [[ -n "$tag" ]] || {
+        warn "Backend tag is required"
+        continue
+      }
+      run_dnstm backend status -t "$tag"
+      ;;
+    20)
+      read -r -p "Backend tag to remove: " tag
+      [[ -n "$tag" ]] || {
+        warn "Backend tag is required"
+        continue
+      }
+      read -r -p "Confirm remove backend '$tag' (y/n): " confirm_remove
+      [[ "$confirm_remove" == "y" ]] || continue
+      run_dnstm backend remove -t "$tag" --force
+      ;;
+    21) run_dnstm ssh-users ;;
+    22) run_dnstm update --force ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
@@ -4428,7 +5521,8 @@ cmd_menu_server() {
     echo "1) Show status"
     echo "2) Tunnel service submenu"
     echo "3) SSH/auth submenu"
-    echo "4) Uninstall everything"
+    echo "4) Native dnstm manager"
+    echo "5) Uninstall everything"
     echo "0) Exit menu"
     read -r -p "Select: " choice
 
@@ -4437,6 +5531,13 @@ cmd_menu_server() {
     2) cmd_menu_server_service ;;
     3) cmd_menu_server_auth ;;
     4)
+      if [[ "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+        cmd_menu_server_dnstm
+      else
+        warn "Native dnstm manager is available only when core is 'dnstm'."
+      fi
+      ;;
+    5)
       read -r -p "Confirm uninstall (y/n): " confirm_uninstall
       [[ "$confirm_uninstall" == "y" ]] || continue
       cmd_uninstall
@@ -4477,34 +5578,52 @@ cmd_menu_server_service() {
 cmd_menu_server_auth() {
   while true; do
     echo ""
-    echo "=== Server SSH/Auth Submenu ==="
-    echo "1) Add SSH tunnel user"
-    echo "2) Change SSH tunnel user password"
-    echo "3) Delete SSH tunnel user"
-    echo "4) List SSH tunnel users"
-    echo "5) Enable/update SSH auth overlay"
-    echo "6) Disable SSH auth overlay"
-    echo "7) Set speed profile secure"
-    echo "8) Set speed profile fast"
-    echo "9) Show speed profile status"
-    echo "10) Switch core (dnstm/nightowl/plus)"
-    echo "0) Back"
-    read -r -p "Select: " choice
+    if [[ "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+      ensure_mode_server_dnstm_or_error
+      echo "=== Server Auth Submenu (dnstm native) ==="
+      echo "1) Open dnstm SSH users manager"
+      echo "2) Open native dnstm manager submenu"
+      echo "3) Switch core (dnstm/nightowl/plus)"
+      echo "0) Back"
+      read -r -p "Select: " choice
 
-    case "$choice" in
-    1) cmd_auth_add ;;
-    2) cmd_auth_passwd ;;
-    3) cmd_auth_del ;;
-    4) cmd_auth_list ;;
-    5) cmd_auth_setup ;;
-    6) cmd_auth_disable ;;
-    7) cmd_speed_profile secure ;;
-    8) cmd_speed_profile fast ;;
-    9) cmd_speed_profile status ;;
-    10) cmd_core_switch ;;
-    0) break ;;
-    *) warn "Invalid option: $choice" ;;
-    esac
+      case "$choice" in
+      1) run_dnstm ssh-users ;;
+      2) cmd_menu_server_dnstm ;;
+      3) cmd_core_switch ;;
+      0) break ;;
+      *) warn "Invalid option: $choice" ;;
+      esac
+    else
+      echo "=== Server SSH/Auth Submenu ==="
+      echo "1) Add SSH tunnel user"
+      echo "2) Change SSH tunnel user password"
+      echo "3) Delete SSH tunnel user"
+      echo "4) List SSH tunnel users"
+      echo "5) Enable/update SSH auth overlay"
+      echo "6) Disable SSH auth overlay"
+      echo "7) Set speed profile secure"
+      echo "8) Set speed profile fast"
+      echo "9) Show speed profile status"
+      echo "10) Switch core (dnstm/nightowl/plus)"
+      echo "0) Back"
+      read -r -p "Select: " choice
+
+      case "$choice" in
+      1) cmd_auth_add ;;
+      2) cmd_auth_passwd ;;
+      3) cmd_auth_del ;;
+      4) cmd_auth_list ;;
+      5) cmd_auth_setup ;;
+      6) cmd_auth_disable ;;
+      7) cmd_speed_profile secure ;;
+      8) cmd_speed_profile fast ;;
+      9) cmd_speed_profile status ;;
+      10) cmd_core_switch ;;
+      0) break ;;
+      *) warn "Invalid option: $choice" ;;
+      esac
+    fi
   done
 }
 
@@ -4640,6 +5759,15 @@ cmd_logs() {
     return
   fi
 
+  if [[ "${MODE:-}" == "server" && "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+    if $follow; then
+      journalctl -u dnstm-dnsrouter -f
+    else
+      run_dnstm router logs -n 100 || journalctl -u dnstm-dnsrouter -n 100 --no-pager
+    fi
+    return
+  fi
+
   local service_name="slipstream-${MODE:-client}"
 
   if $follow; then
@@ -4666,6 +5794,20 @@ cmd_status() {
     if [[ -n "${SLIPSTREAM_REPO:-}" && -n "${SLIPSTREAM_VERSION:-}" ]]; then
       echo "Core source: ${SLIPSTREAM_REPO}@${SLIPSTREAM_VERSION}"
     fi
+    if [[ "${MODE:-}" == "server" && "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+      echo "Native manager: dnstm (${DNSTM_REPO:-$DNSTM_REPO}@${DNSTM_VERSION:-$DNSTM_VERSION})"
+      [[ -n "${DNSTM_MODE:-}" ]] && echo "DNSTM mode: ${DNSTM_MODE}"
+      [[ -n "${DNSTM_TRANSPORT:-}" ]] && echo "DNSTM transport: ${DNSTM_TRANSPORT}"
+      [[ -n "${DNSTM_BACKEND_TAG:-}" ]] && echo "DNSTM backend: ${DNSTM_BACKEND_TAG} (${DNSTM_BACKEND_TYPE:-unknown})"
+      [[ -n "${DNSTM_TUNNEL_TAG:-}" ]] && echo "DNSTM tunnel tag: ${DNSTM_TUNNEL_TAG}"
+    elif [[ "${MODE:-}" == "client" ]]; then
+      echo "Client transport: ${DNSTM_TRANSPORT:-slipstream}"
+      if [[ "${DNSTM_TRANSPORT:-slipstream}" == "dnstt" ]]; then
+        [[ -n "${DNSTM_DNSTT_PUBKEY:-}" ]] && echo "DNSTT pubkey: ${DNSTM_DNSTT_PUBKEY:0:12}..."
+      elif [[ -n "${DNSTM_SLIPSTREAM_CERT:-}" ]]; then
+        echo "Pinned cert: ${DNSTM_SLIPSTREAM_CERT}"
+      fi
+    fi
     [[ -n "${CURRENT_SERVER:-}" ]] && echo "Current DNS: $CURRENT_SERVER"
     if core_supports_ssh_overlay; then
       if [[ "${MODE:-}" == "server" ]]; then
@@ -4685,9 +5827,25 @@ cmd_status() {
   echo ""
   echo "Services:"
   if [[ "${MODE:-}" == "server" ]]; then
-    local status
-    status=$(service_state "slipstream-server")
-    echo "  slipstream-server: $status"
+    if [[ "${SLIPSTREAM_CORE:-}" == "dnstm" ]]; then
+      echo "  dnstm manager: $(if dnstm_is_installed; then echo "installed"; else echo "missing"; fi)"
+      if dnstm_is_installed; then
+        local router_mode backend_tag tunnel_tag transport
+        router_mode="${DNSTM_MODE:-unknown}"
+        backend_tag="${DNSTM_BACKEND_TAG:-unknown}"
+        tunnel_tag="${DNSTM_TUNNEL_TAG:-unknown}"
+        transport="${DNSTM_TRANSPORT:-unknown}"
+        echo "  dnstm mode: $router_mode"
+        echo "  native tunnel: $tunnel_tag (transport=$transport, backend=$backend_tag)"
+        echo ""
+        echo "Native router snapshot:"
+        run_dnstm router status | sed 's/^/  /' || warn "Could not query dnstm router status"
+      fi
+    else
+      local status
+      status=$(service_state "slipstream-server")
+      echo "  slipstream-server: $status"
+    fi
     if core_supports_ssh_overlay && [[ "${SSH_AUTH_ENABLED:-false}" == "true" ]] && command -v getent &>/dev/null; then
       local ssh_users
       ssh_users=$(ssh_group_users | tr '\n' ',' | sed 's/,$//')
@@ -4735,10 +5893,13 @@ cmd_status() {
       if ((extra_count > 0)); then
         echo ""
         echo "Extra client instances:"
+        local extra_transport
         for cfg in "$INSTANCES_DIR"/*/config; do
           [[ -f "$cfg" ]] || continue
           instance=$(basename "$(dirname "$cfg")")
-          echo "  $instance: $(service_state "$(instance_client_service "$instance")")"
+          extra_transport=$(config_value_from_file "$cfg" "DNSTM_TRANSPORT" || true)
+          [[ -n "$extra_transport" ]] || extra_transport="slipstream"
+          echo "  $instance: $(service_state "$(instance_client_service "$instance")"), transport=$extra_transport"
         done
       fi
     fi
@@ -4752,6 +5913,14 @@ cmd_remove() {
   need_root
   check_dependencies systemctl
   log "=== Removing DNS Tunnel ==="
+
+  local configured_mode="" configured_core=""
+  configured_mode=$(config_value_from_file "$CONFIG_FILE" "MODE" || true)
+  configured_core=$(config_value_from_file "$CONFIG_FILE" "SLIPSTREAM_CORE" || true)
+  if [[ "$configured_mode" == "server" && "$configured_core" == "dnstm" && -x "$DNSTM_BIN" ]]; then
+    log "Uninstalling native dnstm components..."
+    "$DNSTM_BIN" uninstall --force >/dev/null 2>&1 || warn "dnstm uninstall reported an error; continuing with cleanup"
+  fi
 
   # Stop and remove systemd services
   if [[ -f /etc/systemd/system/slipstream-server.service ]]; then
@@ -4784,6 +5953,11 @@ cmd_remove() {
   if [[ -f "$SLIPSTREAM_CLIENT_BIN" ]]; then
     log "Removing slipstream-client binary..."
     rm -f "$SLIPSTREAM_CLIENT_BIN"
+  fi
+
+  if [[ -f "$DNSTM_BIN" ]]; then
+    log "Removing dnstm binary..."
+    rm -f "$DNSTM_BIN"
   fi
 
   if [[ -f "$TUNNEL_CMD_BIN" ]]; then
@@ -4886,14 +6060,14 @@ cmd_remove() {
 
   # Restore resolver settings if script changed them.
   if [[ -f "$RESOLV_BACKUP" ]]; then
-    read -p "Restore resolver config from backup? (y/n): " restore_resolver
+    read -r -p "Restore resolver config from backup? (y/n): " restore_resolver
     if [[ "$restore_resolver" == "y" ]]; then
       restore_resolver_if_backed_up
     fi
   fi
 
   if ! systemctl is-active systemd-resolved &>/dev/null; then
-    read -p "Re-enable systemd-resolved service? (y/n): " restore_resolved
+    read -r -p "Re-enable systemd-resolved service? (y/n): " restore_resolved
     if [[ "$restore_resolved" == "y" ]]; then
       log "Re-enabling systemd-resolved..."
       systemctl enable systemd-resolved
@@ -4999,6 +6173,10 @@ main() {
   core-switch)
     shift
     cmd_core_switch "${1:-}"
+    ;;
+  dnstm)
+    shift
+    cmd_dnstm_passthrough "$@"
     ;;
   auth-setup) cmd_auth_setup ;;
   auth-disable) cmd_auth_disable ;;

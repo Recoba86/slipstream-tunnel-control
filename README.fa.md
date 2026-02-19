@@ -98,6 +98,7 @@ slipstream-tunnel menu      # منوی مانیتورینگ دستی
 sst                         # دستور کوتاه برای باز کردن منوی مانیتورینگ
 slipstream-tunnel speed-profile [fast|secure|status] # تغییر/نمایش پروفایل سرعت
 slipstream-tunnel core-switch [dnstm|nightowl|plus] # تعویض هسته بعد از نصب (بدون uninstall)
+slipstream-tunnel dnstm <subcommands...> # پاس‌دادن مستقیم به مدیر native dnstm (سرور+dnstm)
 slipstream-tunnel auth-setup # فعال‌سازی/به‌روزرسانی لایه احراز هویت SSH (سرور)
 slipstream-tunnel auth-disable # غیرفعال‌سازی لایه احراز هویت SSH (سرور)
 slipstream-tunnel auth-client-enable # فعال‌سازی auth SSH در کلاینت
@@ -111,6 +112,8 @@ slipstream-tunnel remove    # حذف همه چیز
 ```
 
 داخل `menu` گزینه‌ها در ساب‌منوهای مرتب (مانیتورینگ، سرویس، auth/profile) گروه‌بندی شده‌اند.
+وقتی هسته سرور `dnstm` باشد، ساب‌منوی native برای مدیریت router/tunnel/backend/ssh-users/update اضافه می‌شود.
+در منوی کلاینت هم ساب‌منوی DNSTM برای مدیریت transport/profile هر تونل (`slipstream`/`dnstt`) اضافه شده است.
 
 ## حالت Multi-Instance کلاینت
 
@@ -129,9 +132,23 @@ slipstream-tunnel instance-list
 slipstream-tunnel instance-status finland
 ```
 
-نکته: کلاینت‌های اضافه فعلاً در حالت direct slipstream اجرا می‌شوند (SSH auth overlay خاموش است).
+نکته: کلاینت‌های اضافه از هر دو transport یعنی `slipstream` و `dnstt` پشتیبانی می‌کنند (SSH auth overlay همچنان خاموش است).
 
 نکته: روی هسته `dnstm`، دستورات قدیمی SSH auth overlay غیرفعال هستند و باید از مکانیزم native همان هسته برای auth/backend استفاده شود.
+
+## مدیریت Native با dnstm
+
+- روی هسته `dnstm` در حالت سرور، اسکریپت الان مدیر native `dnstm` را نصب/استفاده می‌کند.
+- در نصب اولیه، استک native به‌صورت خودکار ساخته می‌شود (install + backend + tunnel اولیه).
+- روی کلاینت با هسته `dnstm`، برای هر تونل/اینستنس می‌توانید transport را بین `slipstream` و `dnstt` انتخاب کنید.
+- مدیریت native هم از داخل منو ممکن است (`Server Main Menu -> Native dnstm manager`) و هم با دستور مستقیم:
+
+```bash
+slipstream-tunnel dnstm router status
+slipstream-tunnel dnstm tunnel list
+slipstream-tunnel dnstm backend list
+slipstream-tunnel dnstm ssh-users
+```
 
 <div dir="rtl">
 
@@ -145,6 +162,18 @@ slipstream-tunnel instance-status finland
 | `--dns-file` | لیست سرورهای DNS (بدون اسکن subnet) |
 | `--dnscan` | مسیر فایل dnscan (حالت آفلاین) |
 | `--slipstream` | مسیر باینری slipstream (حالت آفلاین) |
+| `--transport` | کلاینت: transport برابر `slipstream` (پیش‌فرض) یا `dnstt` (در هسته dnstm) |
+| `--dnstt-pubkey` | کلاینت با transport=`dnstt`: کلید عمومی DNSTT (۶۴ کاراکتر hex) |
+| `--dnstt-client` | کلاینت با transport=`dnstt`: مسیر باینری محلی `dnstt-client` |
+| `--slipstream-cert` | کلاینت با transport=`slipstream`: مسیر اختیاری cert برای pinning |
+| `--dnstm-bin` | سرور: مسیر باینری محلی dnstm (حالت آفلاین) |
+| `--dnstm-transport` | سرور (هسته dnstm): ترنسپورت اولیه `slipstream` یا `dnstt` |
+| `--dnstm-backend` | سرور (هسته dnstm): بک‌اند اولیه `custom`، `socks`، `ssh` یا `shadowsocks` |
+| `--dnstm-backend-tag` | سرور (هسته dnstm): تگ بک‌اند اولیه |
+| `--dnstm-tunnel-tag` | سرور (هسته dnstm): تگ تونل اولیه |
+| `--dnstm-mode` | سرور (هسته dnstm): مود native router (`single` یا `multi`) |
+| `--dnstm-ss-password` | سرور (هسته dnstm): رمز اولیه shadowsocks (اختیاری) |
+| `--dnstm-ss-method` | سرور (هسته dnstm): متد shadowsocks (پیش‌فرض `aes-256-gcm`) |
 | `--manage-resolver` | اجازه تغییر resolver روی سرور |
 | `--ssh-auth` | سرور: فعال‌سازی احراز هویت نام‌کاربری/رمز عبور SSH |
 | `--ssh-backend-port` | سرور: پورت SSH پشت slipstream در حالت auth |
@@ -179,19 +208,18 @@ slipstream-tunnel core-switch dnstm
 1. راهنمای تنظیم DNS کلودفلر (رکوردهای A و NS)
 2. تأیید DNS با `dig`
 3. تشخیص خودکار تداخل پورت 53 و تلاش برای رفع امن آن
-4. تولید گواهی SSL
-5. دانلود و نصب باینری slipstream-server
-6. ساخت و شروع سرویس systemd
-7. اختیاری: فعال‌سازی لایه احراز هویت SSH و ساخت کاربر تونل
+4. اگر هسته `dnstm` باشد: نصب مدیر native `dnstm` + ساخت backend/tunnel اولیه + استارت router
+5. اگر هسته `nightowl/plus` باشد: تولید گواهی SSL + نصب `slipstream-server` + استارت سرویس
+6. اختیاری (فقط هسته‌های legacy): فعال‌سازی لایه احراز هویت SSH و ساخت کاربر تونل
 
 ### راه‌اندازی کلاینت
 
-1. دانلود باینری‌های dnscan و slipstream (کش برای استفاده مجدد)
-2. درخواست پورت تونل کلاینت (پیش‌فرض: 7000)
-3. درخواست تنظیمات اسکن (کشور، حالت، تعداد worker، timeout)
-4. اسکن و تأیید سرورهای DNS با اتصال واقعی تونل
-5. انتخاب سریع‌ترین سرور تأیید شده و شروع slipstream-client
-6. اختیاری: دریافت نام‌کاربری/رمز و فعال‌سازی لایه SSH روی کلاینت
+1. در هسته `dnstm`، انتخاب transport (`slipstream` یا `dnstt`)
+2. دانلود باینری‌های لازم (slipstream client و/یا dnstt-client) با کش
+3. درخواست پورت تونل کلاینت (پیش‌فرض: 7000)
+4. برای `slipstream`: اسکن dnscan با verify؛ برای `dnstt`: ساخت لیست resolverهای قابل دسترس
+5. انتخاب سریع‌ترین resolver و اجرای سرویس کلاینت با transport انتخابی
+6. اختیاری (فقط هسته‌های legacy): دریافت نام‌کاربری/رمز و فعال‌سازی لایه SSH
 7. تنظیم Health (هر ۵ دقیقه) + Runtime Watchdog (هر ۳۰ ثانیه) و باز کردن منوی مانیتورینگ
 
 ### Health و Recovery

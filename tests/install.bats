@@ -37,6 +37,7 @@ setup() {
   [[ "$output" == *"menu"* ]]
   [[ "$output" == *"speed-profile"* ]]
   [[ "$output" == *"core-switch"* ]]
+  [[ "$output" == *"dnstm               Pass-through to native dnstm CLI"* ]]
   [[ "$output" == *"auth-setup"* ]]
   [[ "$output" == *"auth-disable"* ]]
   [[ "$output" == *"auth-client-enable"* ]]
@@ -86,6 +87,8 @@ setup() {
   [[ "$output" == *"--core <name>"* ]]
   [[ "$output" == *"--ssh-auth"* ]]
   [[ "$output" == *"--ssh-backend-port"* ]]
+  [[ "$output" == *"--dnstm-transport <slipstream|dnstt>"* ]]
+  [[ "$output" == *"--dnstm-backend <custom|socks|ssh|shadowsocks>"* ]]
   [[ "$output" == *"--ssh-auth-client"* ]]
   [[ "$output" == *"--ssh-user"* ]]
   [[ "$output" == *"--ssh-pass"* ]]
@@ -132,6 +135,35 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "dnstm asset helper maps architecture to release filename" {
+  run bash -lc "source '$SCRIPT'; [[ \"\$(dnstm_asset_name x86_64)\" == 'dnstm-linux-amd64' ]] && [[ \"\$(dnstm_asset_name arm64)\" == 'dnstm-linux-arm64' ]]"
+  [ "$status" -eq 0 ]
+}
+
+@test "dnstt client asset helper maps architecture to release filename" {
+  run bash -lc "source '$SCRIPT'; [[ \"\$(dnstt_client_asset_name x86_64)\" == 'dnstt-client-linux-amd64' ]] && [[ \"\$(dnstt_client_asset_name arm64)\" == 'dnstt-client-linux-arm64' ]]"
+  [ "$status" -eq 0 ]
+}
+
+@test "dnstt pubkey validator enforces 64-hex format" {
+  run bash -lc "source '$SCRIPT'; validate_dnstt_pubkey_or_error '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
+  [ "$status" -eq 0 ]
+
+  run bash -lc "source '$SCRIPT'; validate_dnstt_pubkey_or_error 'badpubkey'"
+  [ "$status" -ne 0 ]
+}
+
+@test "service name helper returns native router name for dnstm server mode" {
+  run bash -lc "source '$SCRIPT'; MODE=server; SLIPSTREAM_CORE=dnstm; out=\$(service_name_for_mode); [[ \"\$out\" == 'dnstm-router' ]]"
+  [ "$status" -eq 0 ]
+}
+
+@test "dnstm passthrough forwards subcommands in server dnstm mode" {
+  run bash -lc "source '$SCRIPT'; need_root(){ :; }; tmp=\$(mktemp -d); DNSTM_BIN=\"\$tmp/dnstm\"; printf '%s\n' '#!/usr/bin/env bash' 'echo \"dnstm-called:\$*\"' >\"\$DNSTM_BIN\"; chmod +x \"\$DNSTM_BIN\"; CONFIG_FILE=\"\$tmp/config\"; printf '%s\n' 'MODE=server' 'DOMAIN=t.example.com' 'SLIPSTREAM_CORE=dnstm' 'SLIPSTREAM_REPO=net2share/slipstream-rust-build' 'SLIPSTREAM_VERSION=v2026.02.05' 'SLIPSTREAM_ASSET_LAYOUT=binary' >\"\$CONFIG_FILE\"; cmd_dnstm_passthrough router status"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dnstm-called:router status"* ]]
+}
+
 @test "ssh overlay helper is disabled on dnstm core" {
   run bash -lc "source '$SCRIPT'; set_slipstream_source dnstm; ! core_supports_ssh_overlay"
   [ "$status" -eq 0 ]
@@ -148,7 +180,7 @@ setup() {
 }
 
 @test "instance resolver candidates include scanned and configured servers uniquely" {
-  run bash -lc "source '$SCRIPT'; tmp=\$(mktemp -d); TUNNEL_DIR=\"\$tmp\"; CONFIG_FILE=\"\$tmp/config\"; SERVERS_FILE=\"\$tmp/servers.txt\"; INSTANCES_DIR=\"\$tmp/instances\"; mkdir -p \"\$INSTANCES_DIR/a\" \"\$INSTANCES_DIR/b\"; printf '%s\n' 'CURRENT_SERVER=2.2.2.2' >\"\$CONFIG_FILE\"; printf '%s\n' '1.1.1.1' '2.2.2.2' 'bad.ip' >\"\$SERVERS_FILE\"; printf '%s\n' 'CURRENT_SERVER=3.3.3.3' >\"\$INSTANCES_DIR/a/config\"; printf '%s\n' 'CURRENT_SERVER=1.1.1.1' >\"\$INSTANCES_DIR/b/config\"; out=\$(collect_known_resolver_candidates | tr '\n' ' '); [[ \"\$out\" == '2.2.2.2 1.1.1.1 3.3.3.3 ' ]]"
+  run bash -lc "source '$SCRIPT'; tmp=\$(mktemp -d); TUNNEL_DIR=\"\$tmp\"; CONFIG_FILE=\"\$tmp/config\"; SERVERS_FILE=\"\$tmp/servers.txt\"; INSTANCES_DIR=\"\$tmp/instances\"; mkdir -p \"\$INSTANCES_DIR/a\" \"\$INSTANCES_DIR/b\"; printf '%s\n' 'CURRENT_SERVER=2.2.2.2' >\"\$CONFIG_FILE\"; printf '%s\n' '1.1.1.1' '2.2.2.2' 'bad.ip' >\"\$SERVERS_FILE\"; printf '%s\n' 'CURRENT_SERVER=3.3.3.3' >\"\$INSTANCES_DIR/a/config\"; printf '%s\n' 'CURRENT_SERVER=1.1.1.1' >\"\$INSTANCES_DIR/b/config\"; out=\$(collect_known_resolver_candidates | tr '\n' ' '); [[ \"\$out\" == *'2.2.2.2 '* ]] && [[ \"\$out\" == *'1.1.1.1 '* ]] && [[ \"\$out\" == *'3.3.3.3 '* ]] && [[ \"\$out\" == *'9.9.9.9 '* ]]"
   [ "$status" -eq 0 ]
 }
 
