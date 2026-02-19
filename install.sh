@@ -5078,6 +5078,19 @@ cmd_auth_add() {
   check_dependencies getent awk tr chpasswd usermod
   ensure_mode_server_or_error
 
+  if ! core_supports_ssh_overlay; then
+    local native_username="${1:-}" native_password
+    if [[ -z "$native_username" ]]; then
+      read -r -p "New SSH username (native dnstm mode): " native_username
+    fi
+    validate_unix_username_or_error "$native_username"
+    native_password=$(prompt_password_twice "Password for ${native_username}")
+    create_or_update_tunnel_user "$native_username" "$native_password"
+    warn "Native dnstm mode: created SSH user '${native_username}'."
+    warn "Use this user in DNSTT SSH app bridge prompts on clients."
+    return 0
+  fi
+
   if [[ "${SSH_AUTH_ENABLED:-false}" != "true" ]]; then
     warn "SSH auth overlay is disabled. Running setup first..."
     cmd_auth_setup
