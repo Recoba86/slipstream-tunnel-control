@@ -297,6 +297,32 @@ validate_transport_or_error() {
   esac
 }
 
+validate_dnstt_bind_host_or_error() {
+  local bind_host="$1"
+  case "$bind_host" in
+  127.0.0.1 | 0.0.0.0) ;;
+  *) error "Invalid DNSTT bind host: $bind_host (use 127.0.0.1 or 0.0.0.0)" ;;
+  esac
+}
+
+prompt_dnstt_bind_host_or_error() {
+  local current="${1:-127.0.0.1}" input
+  validate_dnstt_bind_host_or_error "$current"
+  while true; do
+    read -r -p "DNSTT bind host [127.0.0.1/0.0.0.0] [$current]: " input
+    [[ -z "$input" ]] && input="$current"
+    case "$input" in
+    127.0.0.1 | 0.0.0.0)
+      echo "$input"
+      return 0
+      ;;
+    *)
+      warn "Invalid bind host: $input"
+      ;;
+    esac
+  done
+}
+
 prompt_core_choice() {
   local current="${1:-dnstm}" input
   while true; do
@@ -2209,6 +2235,7 @@ EOF
 write_client_service_named() {
   local service_name="$1" resolver="$2" domain="$3" port="$4"
   local transport="${5:-slipstream}" slipstream_cert="${6:-}" dnstt_pubkey="${7:-}"
+  local dnstt_bind_host="${8:-${DNSTT_BIND_HOST:-127.0.0.1}}"
   local exec_start=""
 
   validate_transport_or_error "$transport"
@@ -2218,7 +2245,8 @@ write_client_service_named() {
 
   if [[ "$transport" == "dnstt" ]]; then
     validate_dnstt_pubkey_or_error "$dnstt_pubkey"
-    exec_start="$DNSTT_CLIENT_BIN -udp ${resolver}:53 -pubkey ${dnstt_pubkey} ${domain} 127.0.0.1:${port}"
+    validate_dnstt_bind_host_or_error "$dnstt_bind_host"
+    exec_start="$DNSTT_CLIENT_BIN -udp ${resolver}:53 -pubkey ${dnstt_pubkey} ${domain} ${dnstt_bind_host}:${port}"
   else
     exec_start="$SLIPSTREAM_CLIENT_BIN --resolver ${resolver}:53 --domain ${domain} --tcp-listen-port ${port}"
     if [[ -n "$slipstream_cert" ]]; then
@@ -2258,7 +2286,8 @@ write_client_service() {
   local resolver="$1" domain="$2" port="$3" transport="${4:-${DNSTM_TRANSPORT:-slipstream}}"
   local slipstream_cert="${5:-${DNSTM_SLIPSTREAM_CERT:-}}"
   local dnstt_pubkey="${6:-${DNSTM_DNSTT_PUBKEY:-}}"
-  write_client_service_named "slipstream-client" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey"
+  local dnstt_bind_host="${7:-${DNSTT_BIND_HOST:-127.0.0.1}}"
+  write_client_service_named "slipstream-client" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey" "$dnstt_bind_host"
 }
 
 client_transport_port_from_config() {
@@ -2371,7 +2400,7 @@ cmd_client() {
   local slipstream_core="$SLIPSTREAM_CORE"
   local core_from_flag=false
   local domain="" dnscan_path="" slipstream_path="" port="7000" dns_file=""
-  local client_transport="slipstream" dnstt_pubkey="" dnstt_client_path="" slipstream_cert=""
+  local client_transport="slipstream" dnstt_pubkey="" dnstt_client_path="" slipstream_cert="" dnstt_bind_host="127.0.0.1"
   local port_from_flag=false
   local ssh_auth_client=false ssh_user="" ssh_pass="" ssh_remote_port="2053" ssh_transport_port="17070"
 
@@ -2485,6 +2514,10 @@ cmd_client() {
       read -r -p "DNSTT public key (64 hex chars): " dnstt_pubkey
     fi
     validate_dnstt_pubkey_or_error "$dnstt_pubkey"
+    if [[ -t 0 ]]; then
+      dnstt_bind_host=$(prompt_dnstt_bind_host_or_error "$dnstt_bind_host")
+    fi
+    validate_dnstt_bind_host_or_error "$dnstt_bind_host"
     slipstream_cert=""
   else
     if [[ -z "$slipstream_cert" && -t 0 ]]; then
@@ -2492,6 +2525,7 @@ cmd_client() {
     fi
     [[ -z "$slipstream_cert" || -f "$slipstream_cert" ]] || error "Slipstream cert file not found: $slipstream_cert"
     dnstt_pubkey=""
+    dnstt_bind_host=""
   fi
   [[ -n "$domain" ]] && validate_domain_or_error "$domain"
   [[ -n "$dns_file" ]] && validate_dns_file_or_error "$dns_file"
@@ -2759,7 +2793,7 @@ cmd_client() {
 
   # Create systemd service
   log "Creating systemd service..."
-  write_client_service "$best_server" "$domain" "$client_transport_port" "$client_transport" "$slipstream_cert" "$dnstt_pubkey"
+  write_client_service "$best_server" "$domain" "$client_transport_port" "$client_transport" "$slipstream_cert" "$dnstt_pubkey" "$dnstt_bind_host"
 
   systemctl daemon-reload
   systemctl enable slipstream-client
@@ -2813,6 +2847,7 @@ SCAN_TIMEOUT=$scan_timeout
 SCAN_THRESHOLD=$scan_threshold
 DNSTM_TRANSPORT=$client_transport
 DNSTM_DNSTT_PUBKEY=$dnstt_pubkey
+DNSTT_BIND_HOST=$dnstt_bind_host
 DNSTM_SLIPSTREAM_CERT=$slipstream_cert
 SSH_AUTH_ENABLED=$ssh_auth_client
 SSH_AUTH_USER=$ssh_user
@@ -2835,6 +2870,7 @@ EOF
   echo "Transport: $client_transport"
   if [[ "$client_transport" == "dnstt" ]]; then
     echo "DNSTT pubkey: ${dnstt_pubkey:0:12}... (configured)"
+    echo "DNSTT bind host: ${dnstt_bind_host:-127.0.0.1}"
   elif [[ -n "$slipstream_cert" ]]; then
     echo "Pinned cert: $slipstream_cert"
   fi
@@ -3169,9 +3205,10 @@ write_instance_client_service() {
   local instance="$1" resolver="$2" domain="$3" port="$4" transport="${5:-${DNSTM_TRANSPORT:-slipstream}}"
   local slipstream_cert="${6:-${DNSTM_SLIPSTREAM_CERT:-}}"
   local dnstt_pubkey="${7:-${DNSTM_DNSTT_PUBKEY:-}}"
+  local dnstt_bind_host="${8:-${DNSTT_BIND_HOST:-127.0.0.1}}"
   local service_name
   service_name=$(instance_client_service "$instance")
-  write_client_service_named "$service_name" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey"
+  write_client_service_named "$service_name" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey" "$dnstt_bind_host"
 }
 
 setup_instance_timers() {
@@ -3228,7 +3265,7 @@ cmd_instance_add() {
   [[ "${MODE:-}" == "client" ]] || error "Instance add is available only in client mode"
 
   local instance="${1:-}" domain="" port="7001" resolver="" input
-  local transport="slipstream" dnstt_pubkey="" slipstream_cert="" dnstt_client_path=""
+  local transport="slipstream" dnstt_pubkey="" slipstream_cert="" dnstt_client_path="" dnstt_bind_host="127.0.0.1"
   if [[ -z "$instance" ]]; then
     read -r -p "Instance name (e.g., dubai): " instance
   fi
@@ -3257,6 +3294,7 @@ cmd_instance_add() {
     read -r -p "DNSTT public key (64 hex chars): " dnstt_pubkey
     validate_dnstt_pubkey_or_error "$dnstt_pubkey"
     read -r -p "Local dnstt-client binary path (Enter to auto-download): " dnstt_client_path
+    dnstt_bind_host=$(prompt_dnstt_bind_host_or_error "$dnstt_bind_host")
   else
     read -r -p "Pinned slipstream cert path (Enter to skip): " slipstream_cert
     [[ -z "$slipstream_cert" || -f "$slipstream_cert" ]] || error "Slipstream cert file not found: $slipstream_cert"
@@ -3283,6 +3321,7 @@ CURRENT_SERVER=$resolver
 PORT=$port
 DNSTM_TRANSPORT=$transport
 DNSTM_DNSTT_PUBKEY=$dnstt_pubkey
+DNSTT_BIND_HOST=$dnstt_bind_host
 DNSTM_SLIPSTREAM_CERT=$slipstream_cert
 SLIPSTREAM_CORE=$SLIPSTREAM_CORE
 SLIPSTREAM_REPO=$SLIPSTREAM_REPO
@@ -3303,7 +3342,7 @@ SSH_TRANSPORT_PORT=
 EOF
   warn "Instance '$instance' uses transport '$transport' (SSH auth overlay disabled)."
 
-  write_instance_client_service "$instance" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey"
+  write_instance_client_service "$instance" "$resolver" "$domain" "$port" "$transport" "$slipstream_cert" "$dnstt_pubkey" "$dnstt_bind_host"
   setup_instance_timers "$instance"
   systemctl daemon-reload
   start_instance_stack "$instance"
@@ -3359,6 +3398,7 @@ cmd_instance_status() {
   echo "Transport: ${DNSTM_TRANSPORT:-slipstream}"
   if [[ "${DNSTM_TRANSPORT:-slipstream}" == "dnstt" ]]; then
     [[ -n "${DNSTM_DNSTT_PUBKEY:-}" ]] && echo "DNSTT pubkey: ${DNSTM_DNSTT_PUBKEY:0:12}..."
+    echo "DNSTT bind host: ${DNSTT_BIND_HOST:-127.0.0.1}"
   elif [[ -n "${DNSTM_SLIPSTREAM_CERT:-}" ]]; then
     echo "Pinned cert: ${DNSTM_SLIPSTREAM_CERT}"
   fi
@@ -3593,7 +3633,7 @@ cmd_instance_edit() {
   [[ "${MODE:-}" == "client" ]] || error "Instance '$instance' is not in client mode"
 
   local cfg servers_file old_port new_domain new_port new_server
-  local new_transport new_dnstt_pubkey new_slipstream_cert
+  local new_transport new_dnstt_pubkey new_slipstream_cert new_dnstt_bind_host
   cfg=$(instance_config_file "$instance")
   servers_file=$(instance_servers_file "$instance")
   old_port="${PORT:-7001}"
@@ -3602,6 +3642,7 @@ cmd_instance_edit() {
   new_server="${CURRENT_SERVER:-}"
   new_transport="${DNSTM_TRANSPORT:-slipstream}"
   new_dnstt_pubkey="${DNSTM_DNSTT_PUBKEY:-}"
+  new_dnstt_bind_host="${DNSTT_BIND_HOST:-127.0.0.1}"
   new_slipstream_cert="${DNSTM_SLIPSTREAM_CERT:-}"
 
   echo "=== Edit Client Instance: $instance ==="
@@ -3635,6 +3676,7 @@ cmd_instance_edit() {
     read -r -p "DNSTT public key (64 hex chars) [$new_dnstt_pubkey]: " input
     [[ -n "$input" ]] && new_dnstt_pubkey="$input"
     validate_dnstt_pubkey_or_error "$new_dnstt_pubkey"
+    new_dnstt_bind_host=$(prompt_dnstt_bind_host_or_error "$new_dnstt_bind_host")
     new_slipstream_cert=""
     ensure_instance_client_binary "$new_transport"
   else
@@ -3644,6 +3686,7 @@ cmd_instance_edit() {
     fi
     [[ -z "$new_slipstream_cert" || -f "$new_slipstream_cert" ]] || error "Slipstream cert file not found: $new_slipstream_cert"
     new_dnstt_pubkey=""
+    new_dnstt_bind_host=""
     ensure_instance_client_binary "$new_transport"
   fi
 
@@ -3656,12 +3699,13 @@ cmd_instance_edit() {
   set_config_value "CURRENT_SERVER" "$new_server" "$cfg"
   set_config_value "DNSTM_TRANSPORT" "$new_transport" "$cfg"
   set_config_value "DNSTM_DNSTT_PUBKEY" "$new_dnstt_pubkey" "$cfg"
+  set_config_value "DNSTT_BIND_HOST" "$new_dnstt_bind_host" "$cfg"
   set_config_value "DNSTM_SLIPSTREAM_CERT" "$new_slipstream_cert" "$cfg"
   if [[ "${SCAN_SOURCE:-file}" == "file" ]]; then
     set_config_value "SCAN_DNS_FILE" "$servers_file" "$cfg"
   fi
 
-  write_instance_client_service "$instance" "$new_server" "$new_domain" "$new_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey"
+  write_instance_client_service "$instance" "$new_server" "$new_domain" "$new_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey" "$new_dnstt_bind_host"
   setup_instance_timers "$instance"
   systemctl daemon-reload
   restart_instance_stack "$instance"
@@ -4021,6 +4065,7 @@ cmd_edit_client() {
   local new_ssh_transport_port="${SSH_TRANSPORT_PORT:-17070}"
   local new_transport="${DNSTM_TRANSPORT:-slipstream}"
   local new_dnstt_pubkey="${DNSTM_DNSTT_PUBKEY:-}"
+  local new_dnstt_bind_host="${DNSTT_BIND_HOST:-127.0.0.1}"
   local new_slipstream_cert="${DNSTM_SLIPSTREAM_CERT:-}"
   local new_ssh_pass_plain=""
   local input=""
@@ -4065,6 +4110,10 @@ cmd_edit_client() {
       [[ -n "$input" ]] && new_dnstt_pubkey="$input"
     fi
     validate_dnstt_pubkey_or_error "$new_dnstt_pubkey"
+    if [[ -t 0 ]]; then
+      new_dnstt_bind_host=$(prompt_dnstt_bind_host_or_error "$new_dnstt_bind_host")
+    fi
+    validate_dnstt_bind_host_or_error "$new_dnstt_bind_host"
     new_slipstream_cert=""
     ensure_dnstt_client_binary
   else
@@ -4076,6 +4125,7 @@ cmd_edit_client() {
     fi
     [[ -z "$new_slipstream_cert" || -f "$new_slipstream_cert" ]] || error "Slipstream cert file not found: $new_slipstream_cert"
     new_dnstt_pubkey=""
+    new_dnstt_bind_host=""
     ensure_slipstream_client_binary
   fi
 
@@ -4102,7 +4152,7 @@ cmd_edit_client() {
   fi
 
   if [[ "$new_ssh_auth" == "true" ]]; then
-    write_client_service "$new_server" "$new_domain" "$new_ssh_transport_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey"
+    write_client_service "$new_server" "$new_domain" "$new_ssh_transport_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey" "$new_dnstt_bind_host"
     systemctl daemon-reload
     systemctl restart slipstream-client
     systemctl stop "${SSH_CLIENT_SERVICE}" 2>/dev/null || true
@@ -4125,6 +4175,7 @@ cmd_edit_client() {
     set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
     set_config_value "DNSTM_TRANSPORT" "$new_transport" "$CONFIG_FILE"
     set_config_value "DNSTM_DNSTT_PUBKEY" "$new_dnstt_pubkey" "$CONFIG_FILE"
+    set_config_value "DNSTT_BIND_HOST" "$new_dnstt_bind_host" "$CONFIG_FILE"
     set_config_value "DNSTM_SLIPSTREAM_CERT" "$new_slipstream_cert" "$CONFIG_FILE"
     set_config_value "SSH_AUTH_ENABLED" "true" "$CONFIG_FILE"
     set_config_value "SSH_AUTH_USER" "$new_ssh_user" "$CONFIG_FILE"
@@ -4145,8 +4196,9 @@ cmd_edit_client() {
     set_config_value "CURRENT_SERVER" "$new_server" "$CONFIG_FILE"
     set_config_value "DNSTM_TRANSPORT" "$new_transport" "$CONFIG_FILE"
     set_config_value "DNSTM_DNSTT_PUBKEY" "$new_dnstt_pubkey" "$CONFIG_FILE"
+    set_config_value "DNSTT_BIND_HOST" "$new_dnstt_bind_host" "$CONFIG_FILE"
     set_config_value "DNSTM_SLIPSTREAM_CERT" "$new_slipstream_cert" "$CONFIG_FILE"
-    write_client_service "$new_server" "$new_domain" "$new_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey"
+    write_client_service "$new_server" "$new_domain" "$new_port" "$new_transport" "$new_slipstream_cert" "$new_dnstt_pubkey" "$new_dnstt_bind_host"
     remove_ssh_client_service_if_present
     SSH_AUTH_ENABLED="false"
   fi
@@ -5801,10 +5853,11 @@ cmd_status() {
       [[ -n "${DNSTM_BACKEND_TAG:-}" ]] && echo "DNSTM backend: ${DNSTM_BACKEND_TAG} (${DNSTM_BACKEND_TYPE:-unknown})"
       [[ -n "${DNSTM_TUNNEL_TAG:-}" ]] && echo "DNSTM tunnel tag: ${DNSTM_TUNNEL_TAG}"
     elif [[ "${MODE:-}" == "client" ]]; then
-      echo "Client transport: ${DNSTM_TRANSPORT:-slipstream}"
-      if [[ "${DNSTM_TRANSPORT:-slipstream}" == "dnstt" ]]; then
-        [[ -n "${DNSTM_DNSTT_PUBKEY:-}" ]] && echo "DNSTT pubkey: ${DNSTM_DNSTT_PUBKEY:0:12}..."
-      elif [[ -n "${DNSTM_SLIPSTREAM_CERT:-}" ]]; then
+    echo "Client transport: ${DNSTM_TRANSPORT:-slipstream}"
+    if [[ "${DNSTM_TRANSPORT:-slipstream}" == "dnstt" ]]; then
+      [[ -n "${DNSTM_DNSTT_PUBKEY:-}" ]] && echo "DNSTT pubkey: ${DNSTM_DNSTT_PUBKEY:0:12}..."
+      echo "DNSTT bind host: ${DNSTT_BIND_HOST:-127.0.0.1}"
+    elif [[ -n "${DNSTM_SLIPSTREAM_CERT:-}" ]]; then
         echo "Pinned cert: ${DNSTM_SLIPSTREAM_CERT}"
       fi
     fi
