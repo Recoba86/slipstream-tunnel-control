@@ -6571,55 +6571,63 @@ extract_dnscan_verify_counts() {
 run_dnscan_with_live_progress() {
   local label="$1" output_file="$2"
   shift 2
-  local log_file dnscan_pid monitor_pid
+  local log_file
   local verified=0 scanned="?" total="?" found=0 rc=0
   local verify_tested="" verify_total="" verify_passed="" verify_line=""
+  local cmdline="" script_mode="none"
 
   log_file=$(mktemp /tmp/dnscan-live.XXXXXX.log)
   : >"$output_file"
   echo "[scan] ${label}: started"
 
-  (
-    set -o pipefail
-    "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"
-  ) &
-  dnscan_pid=$!
-
-  (
-    while kill -0 "$dnscan_pid" 2>/dev/null; do
-      if [[ -f "$output_file" ]]; then
-        verified=$(wc -l <"$output_file" 2>/dev/null || echo 0)
-      else
-        verified=0
-      fi
-      scanned=$(extract_dnscan_scanned_count "$log_file")
-      total=$(extract_dnscan_total_count "$log_file")
-      found=$(extract_dnscan_found_count "$log_file")
-      [[ -n "$total" ]] || total="?"
-      [[ -n "$found" ]] || found=0
-      if [[ -z "$scanned" ]]; then
-        [[ "$total" =~ ^[0-9]+$ ]] && scanned=0 || scanned="?"
-      fi
-      verify_line=$(extract_dnscan_verify_counts "$log_file")
-      if [[ -n "$verify_line" ]]; then
-        read -r verify_tested verify_total verify_passed <<<"$verify_line"
-        echo "[scan] ${label}: scanned=${scanned}/${total} found=${found} verify=${verify_tested}/${verify_total} passed=${verify_passed} confirmed=${verified}"
-      else
-        echo "[scan] ${label}: scanned=${scanned}/${total} found=${found} confirmed=${verified}"
-      fi
-      sleep 2
-    done
-  ) &
-  monitor_pid=$!
-
-  if wait "$dnscan_pid"; then
-    rc=0
-  else
-    rc=$?
+  # dnscan prints frequent progress updates only when attached to a TTY.
+  # When this helper runs in background pipelines, those updates can disappear.
+  # Force a pseudo-TTY with `script` when available so live counters stay visible.
+  if command -v script >/dev/null 2>&1; then
+    if script -q -f -c "true" /dev/null >/dev/null 2>&1; then
+      script_mode="with-c-flush"
+      printf -v cmdline '%q ' "$@"
+    elif script -q -c "true" /dev/null >/dev/null 2>&1; then
+      script_mode="with-c"
+      printf -v cmdline '%q ' "$@"
+    elif script -q -f /dev/null true >/dev/null 2>&1; then
+      script_mode="direct-args-flush"
+    else
+      script_mode="direct-args"
+    fi
   fi
 
-  kill "$monitor_pid" 2>/dev/null || true
-  wait "$monitor_pid" 2>/dev/null || true
+  if [[ "$script_mode" == "with-c-flush" ]]; then
+    if (set -o pipefail; script -q -f -c "$cmdline" /dev/null 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+      rc=0
+    else
+      rc=$?
+    fi
+  elif [[ "$script_mode" == "with-c" ]]; then
+    if (set -o pipefail; script -q -c "$cmdline" /dev/null 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+      rc=0
+    else
+      rc=$?
+    fi
+  elif [[ "$script_mode" == "direct-args-flush" ]]; then
+    if (set -o pipefail; script -q -f /dev/null "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+      rc=0
+    else
+      rc=$?
+    fi
+  elif [[ "$script_mode" == "direct-args" ]]; then
+    if (set -o pipefail; script -q /dev/null "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+      rc=0
+    else
+      rc=$?
+    fi
+  else
+    if (set -o pipefail; "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+      rc=0
+    else
+      rc=$?
+    fi
+  fi
 
   if [[ -f "$output_file" ]]; then
     verified=$(wc -l <"$output_file" 2>/dev/null || echo 0)
