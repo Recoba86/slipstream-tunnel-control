@@ -6533,9 +6533,9 @@ extract_dnscan_scanned_count() {
   local log_file="$1"
   [[ -f "$log_file" ]] || return 0
   local scanned=""
-  scanned=$(tail -n 300 "$log_file" | sed -n -E 's/.*[Ss]canned:[[:space:]]*([0-9]+).*/\1/p' | tail -n1)
+  scanned=$(tr '\r' '\n' <"$log_file" | tail -n 300 | sed -n -E 's/.*[Ss]canned:[[:space:]]*([0-9]+).*/\1/p' | tail -n1)
   if [[ -z "$scanned" ]]; then
-    scanned=$(tail -n 300 "$log_file" | sed -n -E 's/.*[Ss]can:[[:space:]]*([0-9]+)\/([0-9]+).*/\1/p' | tail -n1)
+    scanned=$(tr '\r' '\n' <"$log_file" | tail -n 300 | sed -n -E 's/.*[Ss]can:[[:space:]]*([0-9]+)\/([0-9]+).*/\1/p' | tail -n1)
   fi
   [[ -n "$scanned" ]] && echo "$scanned"
 }
@@ -6544,9 +6544,9 @@ extract_dnscan_total_count() {
   local log_file="$1"
   [[ -f "$log_file" ]] || return 0
   local total=""
-  total=$(tail -n 300 "$log_file" | sed -n -E 's/.*IPs to scan:[[:space:]]*([0-9]+).*/\1/p' | tail -n1)
+  total=$(tr '\r' '\n' <"$log_file" | tail -n 300 | sed -n -E 's/.*IPs to scan:[[:space:]]*([0-9]+).*/\1/p' | tail -n1)
   if [[ -z "$total" ]]; then
-    total=$(tail -n 300 "$log_file" | sed -n -E 's/.*[Ss]can:[[:space:]]*([0-9]+)\/([0-9]+).*/\2/p' | tail -n1)
+    total=$(tr '\r' '\n' <"$log_file" | tail -n 300 | sed -n -E 's/.*[Ss]can:[[:space:]]*([0-9]+)\/([0-9]+).*/\2/p' | tail -n1)
   fi
   [[ -n "$total" ]] && echo "$total"
 }
@@ -6554,16 +6554,16 @@ extract_dnscan_total_count() {
 extract_dnscan_found_count() {
   local log_file="$1"
   [[ -f "$log_file" ]] || return 0
-  tail -n 300 "$log_file" | sed -n -E 's/.*[Ff]ound:[[:space:]]*([0-9]+).*/\1/p' | tail -n1
+  tr '\r' '\n' <"$log_file" | tail -n 300 | sed -n -E 's/.*[Ff]ound:[[:space:]]*([0-9]+).*/\1/p' | tail -n1
 }
 
 extract_dnscan_verify_counts() {
   local log_file="$1"
   [[ -f "$log_file" ]] || return 0
   local line=""
-  line=$(tail -n 400 "$log_file" | sed -n -E 's/.*Verifying:[[:space:]]*([0-9]+)\/([0-9]+)[[:space:]]*tested,[[:space:]]*([0-9]+)[[:space:]]*passed.*/\1 \2 \3/p' | tail -n1)
+  line=$(tr '\r' '\n' <"$log_file" | tail -n 400 | sed -n -E 's/.*Verifying:[[:space:]]*([0-9]+)\/([0-9]+)[[:space:]]*tested,[[:space:]]*([0-9]+)[[:space:]]*passed.*/\1 \2 \3/p' | tail -n1)
   if [[ -z "$line" ]]; then
-    line=$(tail -n 400 "$log_file" | sed -n -E 's/.*Verify:[[:space:]]*([0-9]+)\/([0-9]+)[[:space:]]*\|[[:space:]]*Passed:[[:space:]]*([0-9]+).*/\1 \2 \3/p' | tail -n1)
+    line=$(tr '\r' '\n' <"$log_file" | tail -n 400 | sed -n -E 's/.*Verify:[[:space:]]*([0-9]+)\/([0-9]+)[[:space:]]*\|[[:space:]]*Passed:[[:space:]]*([0-9]+).*/\1 \2 \3/p' | tail -n1)
   fi
   [[ -n "$line" ]] && echo "$line"
 }
@@ -6598,31 +6598,31 @@ run_dnscan_with_live_progress() {
   fi
 
   if [[ "$script_mode" == "with-c-flush" ]]; then
-    if (set -o pipefail; script -q -f -c "$cmdline" /dev/null 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+    if (set -o pipefail; script -q -f -c "$cmdline" /dev/null 2>&1 | tee "$log_file"); then
       rc=0
     else
       rc=$?
     fi
   elif [[ "$script_mode" == "with-c" ]]; then
-    if (set -o pipefail; script -q -c "$cmdline" /dev/null 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+    if (set -o pipefail; script -q -c "$cmdline" /dev/null 2>&1 | tee "$log_file"); then
       rc=0
     else
       rc=$?
     fi
   elif [[ "$script_mode" == "direct-args-flush" ]]; then
-    if (set -o pipefail; script -q -f /dev/null "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+    if (set -o pipefail; script -q -f /dev/null "$@" 2>&1 | tee "$log_file"); then
       rc=0
     else
       rc=$?
     fi
   elif [[ "$script_mode" == "direct-args" ]]; then
-    if (set -o pipefail; script -q /dev/null "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+    if (set -o pipefail; script -q /dev/null "$@" 2>&1 | tee "$log_file"); then
       rc=0
     else
       rc=$?
     fi
   else
-    if (set -o pipefail; "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"); then
+    if (set -o pipefail; "$@" 2>&1 | tee "$log_file"); then
       rc=0
     else
       rc=$?
