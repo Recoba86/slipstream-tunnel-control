@@ -763,7 +763,7 @@ prompt_instance_resolver_or_error() {
       if command -v dig &>/dev/null; then
         if resolver_answers_dns_queries "$candidate_resolver"; then
           latency=$(test_dns_latency "$candidate_resolver" "$domain" || echo "9999")
-          if [[ "$latency" -lt 1000 ]]; then
+          if [[ "$latency" =~ ^[0-9]+$ && "$latency" -lt 9999 ]]; then
             printf "  %d) %s (dns=reachable, tunnel=%sms)\n" "$i" "$candidate_resolver" "$latency"
           else
             printf "  %d) %s (dns=reachable, tunnel=no-answer)\n" "$i" "$candidate_resolver"
@@ -2567,11 +2567,10 @@ find_best_server() {
   sort -n "$ranked_tmp" >"$sorted_tmp"
   read -r best_latency best_server <"$sorted_tmp"
 
-  # Run real transport-path checks on top fast candidates only.
+  # Run real transport-path checks on top ranked candidates.
   while IFS= read -r lat server; do
     [[ -n "$server" ]] || continue
     [[ "$lat" =~ ^[0-9]+$ ]] || continue
-    ((lat < 1000)) || continue
 
     attempts=$((attempts + 1))
     ((attempts <= 4)) || break
@@ -2605,7 +2604,7 @@ prompt_scan_settings_for_profile() {
   local scan_mode="${SCAN_MODE:-fast}"
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
-  local scan_threshold="${SCAN_THRESHOLD:-50}"
+  local scan_threshold="${SCAN_THRESHOLD:-0}"
   local input=""
 
   [[ "$scan_source" == "generated" || "$scan_source" == "file" ]] || scan_source="generated"
@@ -2895,7 +2894,7 @@ cmd_client() {
   local scan_mode="fast"
   local scan_workers="500"
   local scan_timeout="2s"
-  local scan_threshold="50"
+  local scan_threshold="0"
   local best_server best_latency
   local slipstream_bin="" installed_bin="$SLIPSTREAM_CLIENT_BIN" slipstream_asset=""
   if [[ "$client_transport" == "dnstt" ]]; then
@@ -2980,7 +2979,7 @@ cmd_client() {
       [[ -n "$input_workers" ]] && scan_workers="$input_workers"
       read -r -p "Timeout [2s]: " input_timeout
       [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
-      read -r -p "Benchmark threshold % [50]: " input_threshold
+      read -r -p "Benchmark threshold % [0]: " input_threshold
       [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
       dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
     else
@@ -2995,7 +2994,7 @@ cmd_client() {
         [[ -n "$input_workers" ]] && scan_workers="$input_workers"
         read -r -p "Timeout [2s]: " input_timeout
         [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
-        read -r -p "Benchmark threshold % [50]: " input_threshold
+        read -r -p "Benchmark threshold % [0]: " input_threshold
         [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
         dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
       else
@@ -3014,7 +3013,7 @@ cmd_client() {
         [[ -n "$input_workers" ]] && scan_workers="$input_workers"
         read -r -p "Timeout [2s]: " input_timeout
         [[ -n "$input_timeout" ]] && scan_timeout="$input_timeout"
-        read -r -p "Benchmark threshold % [50]: " input_threshold
+        read -r -p "Benchmark threshold % [0]: " input_threshold
         [[ -n "$input_threshold" ]] && scan_threshold="$input_threshold"
 
         dnscan_args+=(
@@ -3046,7 +3045,7 @@ cmd_client() {
   [[ -n "$best_server" ]] || error "Could not choose a working DNS server"
   [[ "$best_latency" =~ ^[0-9]+$ ]] || best_latency=9999
   if [[ "$best_latency" -ge 1000 ]]; then
-    error "No resolver passed transport data-path validation for ${domain}. Update resolver candidates and retry."
+    warn "Selected resolver has high DNS latency (${best_latency}ms), but it passed transport data-path validation."
   fi
   log "Using DNS server: $best_server (${best_latency}ms)"
 
@@ -3339,7 +3338,7 @@ cmd_health() {
     local best_server best_latency
     read -r best_server best_latency <<<"$(find_best_server "$current_domain" "$SERVERS_FILE")"
 
-    if [[ -n "$best_server" && "$best_server" != "$current_server" && "$best_latency" -lt 1000 ]]; then
+    if [[ -n "$best_server" && "$best_server" != "$current_server" && "$best_latency" -lt 9999 ]]; then
       echo "Switching to $best_server (${best_latency}ms)"
       echo "[$timestamp] Switching to $best_server (${best_latency}ms)" >>"$HEALTH_LOG"
 
@@ -3388,7 +3387,7 @@ cmd_rescan() {
   local scan_file="${SCAN_DNS_FILE:-$SERVERS_FILE}"
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
-  local scan_threshold="${SCAN_THRESHOLD:-50}"
+  local scan_threshold="${SCAN_THRESHOLD:-0}"
 
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_source" == "file" ]]; then
@@ -3433,7 +3432,9 @@ cmd_rescan() {
   read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$SERVERS_FILE")"
   [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan"
   [[ "$best_latency" =~ ^[0-9]+$ ]] || best_latency=9999
-  [[ "$best_latency" -lt 1000 ]] || error "No resolver passed transport data-path validation after manual rescan"
+  if [[ "$best_latency" -ge 1000 ]]; then
+    warn "Best resolver has high DNS latency (${best_latency}ms), but it passed transport data-path validation."
+  fi
 
   set_config_value "CURRENT_SERVER" "$best_server" "$CONFIG_FILE"
   local transport_port
@@ -3702,7 +3703,7 @@ SCAN_COUNTRY=ir
 SCAN_MODE=fast
 SCAN_WORKERS=500
 SCAN_TIMEOUT=2s
-SCAN_THRESHOLD=50
+SCAN_THRESHOLD=0
 SSH_AUTH_ENABLED=false
 SSH_AUTH_USER=
 SSH_PASS_B64=
@@ -3877,10 +3878,14 @@ cmd_instance_servers() {
     is_valid_ipv4 "$server" || continue
     ping_ms=$(ping_rtt_ms "$server")
     dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
-    if [[ "$dns_ms" -lt 1000 ]]; then
-      status="OK"
+    if [[ "$dns_ms" =~ ^[0-9]+$ && "$dns_ms" -lt 9999 ]]; then
+      if [[ "$dns_ms" -ge 1000 ]]; then
+        status="OK-HIGH-LATENCY"
+      else
+        status="OK"
+      fi
     else
-      status="SLOW/FAIL"
+      status="FAIL"
     fi
     printf "%-16s %-12s %-12s %s\n" "$server" "$ping_ms" "$dns_ms" "$status"
   done <"$servers_file"
@@ -3913,10 +3918,14 @@ cmd_instance_select_server() {
   for server in "${servers[@]}"; do
     ping_ms=$(ping_rtt_ms "$server")
     dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
-    if [[ "$dns_ms" -lt 1000 ]]; then
-      status="OK"
+    if [[ "$dns_ms" =~ ^[0-9]+$ && "$dns_ms" -lt 9999 ]]; then
+      if [[ "$dns_ms" -ge 1000 ]]; then
+        status="OK-HIGH-LATENCY"
+      else
+        status="OK"
+      fi
     else
-      status="SLOW/FAIL"
+      status="FAIL"
     fi
     printf "%2d) %-15s ping=%-10s dns=%-8s %s\n" "$i" "$server" "$ping_ms" "$dns_ms" "$status"
     i=$((i + 1))
@@ -3969,7 +3978,7 @@ cmd_instance_rescan() {
   local scan_file="${SCAN_DNS_FILE:-$servers_file}"
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
-  local scan_threshold="${SCAN_THRESHOLD:-50}"
+  local scan_threshold="${SCAN_THRESHOLD:-0}"
 
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_source" == "file" ]]; then
@@ -4014,7 +4023,9 @@ cmd_instance_rescan() {
   read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$servers_file")"
   [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan for '$instance'"
   [[ "$best_latency" =~ ^[0-9]+$ ]] || best_latency=9999
-  [[ "$best_latency" -lt 1000 ]] || error "No resolver passed transport data-path validation for instance '$instance'"
+  if [[ "$best_latency" -ge 1000 ]]; then
+    warn "Best resolver for instance '$instance' has high DNS latency (${best_latency}ms), but it passed transport data-path validation."
+  fi
 
   set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
   write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT" "$transport" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
@@ -4260,7 +4271,7 @@ cmd_instance_health() {
     if [[ -f "$servers_file" ]]; then
       local best_server best_latency
       read -r best_server best_latency <<<"$(find_best_server "$current_domain" "$servers_file" || true)"
-      if [[ -n "$best_server" && "$best_server" != "$current_server" && "$best_latency" -lt 1000 ]]; then
+      if [[ -n "$best_server" && "$best_server" != "$current_server" && "$best_latency" -lt 9999 ]]; then
         set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
         write_instance_client_service "$instance" "$best_server" "$current_domain" "$current_port" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
         systemctl daemon-reload
@@ -4362,10 +4373,14 @@ cmd_servers() {
     is_valid_ipv4 "$server" || continue
     ping_ms=$(ping_rtt_ms "$server")
     dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
-    if [[ "$dns_ms" -lt 1000 ]]; then
-      status="OK"
+    if [[ "$dns_ms" =~ ^[0-9]+$ && "$dns_ms" -lt 9999 ]]; then
+      if [[ "$dns_ms" -ge 1000 ]]; then
+        status="OK-HIGH-LATENCY"
+      else
+        status="OK"
+      fi
     else
-      status="SLOW/FAIL"
+      status="FAIL"
     fi
     printf "%-16s %-12s %-12s %s\n" "$server" "$ping_ms" "$dns_ms" "$status"
   done <"$SERVERS_FILE"
@@ -4393,10 +4408,14 @@ cmd_select_server() {
   for server in "${servers[@]}"; do
     ping_ms=$(ping_rtt_ms "$server")
     dns_ms=$(test_dns_latency "$server" "$DOMAIN" || echo "9999")
-    if [[ "$dns_ms" -lt 1000 ]]; then
-      status="OK"
+    if [[ "$dns_ms" =~ ^[0-9]+$ && "$dns_ms" -lt 9999 ]]; then
+      if [[ "$dns_ms" -ge 1000 ]]; then
+        status="OK-HIGH-LATENCY"
+      else
+        status="OK"
+      fi
     else
-      status="SLOW/FAIL"
+      status="FAIL"
     fi
     printf "%2d) %-15s ping=%-10s dns=%-8s %s\n" "$i" "$server" "$ping_ms" "$dns_ms" "$status"
     i=$((i + 1))
@@ -4590,7 +4609,9 @@ cmd_edit_client() {
     local auto_latency
     read -r new_server auto_latency <<<"$(find_best_server "$new_domain" "$SERVERS_FILE" "$new_transport" "$new_dnstt_pubkey" "$new_slipstream_cert" "$new_dnstt_bind_host")"
     [[ "$auto_latency" =~ ^[0-9]+$ ]] || auto_latency=9999
-    [[ "$auto_latency" -lt 1000 ]] || error "No resolver passed transport data-path validation for ${new_domain}. Run rescan with better candidates."
+    if [[ "$auto_latency" -ge 1000 ]]; then
+      warn "Auto-selected resolver has high DNS latency (${auto_latency}ms), but it passed transport data-path validation."
+    fi
   fi
   [[ -n "$new_server" ]] || error "No DNS resolver available. Run 'slipstream-tunnel rescan' first."
   if [[ "$new_transport" == "dnstt" ]]; then
