@@ -2605,6 +2605,7 @@ prompt_scan_settings_for_profile() {
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-0}"
+  local scan_dnstt_mode="${SCAN_DNSTT_MODE:-candidate}"
   local input=""
 
   [[ "$scan_source" == "generated" || "$scan_source" == "file" ]] || scan_source="generated"
@@ -2614,10 +2615,29 @@ prompt_scan_settings_for_profile() {
     echo ""
     echo "=== DNS Scan Settings ==="
     if [[ "$transport_mode" == "dnstt" ]]; then
-      echo "DNSTT uses candidate refresh + real data-path probe (not dnscan latency benchmark scan)."
+      echo "DNSTT scan strategies:"
+      echo "  candidate - refresh known resolvers + real data-path probe (fast)"
+      echo "  deep      - wide dnscan (slipstream verify) + real DNSTT data-path probe (slower)"
     fi
     echo "Press Enter to keep current values."
     echo ""
+
+    if [[ "$transport_mode" == "dnstt" ]]; then
+      while true; do
+        prompt_read input "DNSTT scan mode [candidate/deep] [$scan_dnstt_mode]: "
+        [[ -z "$input" ]] && break
+        case "$input" in
+        candidate | deep)
+          scan_dnstt_mode="$input"
+          break
+          ;;
+        *)
+          warn "Invalid DNSTT scan mode: $input"
+          ;;
+        esac
+      done
+    fi
+
     while true; do
       prompt_read input "Scan source [generated/file] [$scan_source]: "
       [[ -z "$input" ]] && break
@@ -2637,7 +2657,7 @@ prompt_scan_settings_for_profile() {
       [[ -n "$input" ]] && scan_file="$input"
       [[ -n "$scan_file" ]] || error "DNS file path is required when scan source is 'file'"
     else
-      if [[ "$transport_mode" != "dnstt" ]]; then
+      if [[ "$transport_mode" != "dnstt" || "$scan_dnstt_mode" == "deep" ]]; then
         echo "Modes: list | fast | medium | all"
         prompt_read input "Country code [$scan_country]: "
         [[ -n "$input" ]] && scan_country="$input"
@@ -2646,7 +2666,7 @@ prompt_scan_settings_for_profile() {
       fi
     fi
 
-    if [[ "$transport_mode" != "dnstt" ]]; then
+    if [[ "$transport_mode" != "dnstt" || "$scan_dnstt_mode" == "deep" ]]; then
       prompt_read input "Workers [$scan_workers]: "
       [[ -n "$input" ]] && scan_workers="$input"
       prompt_read input "Timeout [$scan_timeout]: "
@@ -2669,6 +2689,7 @@ prompt_scan_settings_for_profile() {
   set_config_value "SCAN_WORKERS" "$scan_workers" "$config_file"
   set_config_value "SCAN_TIMEOUT" "$scan_timeout" "$config_file"
   set_config_value "SCAN_THRESHOLD" "$scan_threshold" "$config_file"
+  set_config_value "SCAN_DNSTT_MODE" "$scan_dnstt_mode" "$config_file"
 }
 
 # ============================================
@@ -2904,6 +2925,7 @@ cmd_client() {
   local scan_workers="500"
   local scan_timeout="2s"
   local scan_threshold="0"
+  local scan_dnstt_mode="candidate"
   local best_server best_latency
   local slipstream_bin="" installed_bin="$SLIPSTREAM_CLIENT_BIN" slipstream_asset=""
   if [[ "$client_transport" == "dnstt" ]]; then
@@ -3130,6 +3152,7 @@ SCAN_MODE=$scan_mode
 SCAN_WORKERS=$scan_workers
 SCAN_TIMEOUT=$scan_timeout
 SCAN_THRESHOLD=$scan_threshold
+SCAN_DNSTT_MODE=$scan_dnstt_mode
 DNSTM_TRANSPORT=$client_transport
 DNSTM_DNSTT_PUBKEY=$dnstt_pubkey
 DNSTT_BIND_HOST=$dnstt_bind_host
@@ -3397,15 +3420,43 @@ cmd_rescan() {
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-0}"
+  local scan_dnstt_mode="${SCAN_DNSTT_MODE:-candidate}"
 
   if [[ "$transport" == "dnstt" ]]; then
-    if [[ "$scan_source" == "file" ]]; then
-      validate_dns_file_or_error "$scan_file"
-      refresh_resolver_candidates_file "$DOMAIN" "$SERVERS_FILE" "$scan_file" "${CURRENT_SERVER:-}" \
-        || error "Manual rescan found no reachable DNS resolvers"
+    if [[ "$scan_dnstt_mode" == "deep" ]]; then
+      [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
+      ensure_slipstream_client_binary
+      ensure_dnstt_client_binary
+      local dnscan_args=(
+        --domain "$DOMAIN"
+        --data-dir "$DNSCAN_DIR/data"
+        --output "$SERVERS_FILE"
+        --verify "$SLIPSTREAM_CLIENT_BIN"
+      )
+
+      if [[ "$scan_source" == "file" ]]; then
+        validate_dns_file_or_error "$scan_file"
+        dnscan_args+=(--file "$scan_file")
+      else
+        dnscan_args+=(
+          --country "${SCAN_COUNTRY:-ir}"
+          --mode "${SCAN_MODE:-fast}"
+        )
+      fi
+      dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
+
+      log "Running DNSTT deep scan (dnscan + DNSTT probe)..."
+      "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+      [[ -s "$SERVERS_FILE" ]] || error "DNSTT deep scan found no verified DNS servers"
     else
-      refresh_resolver_candidates_file "$DOMAIN" "$SERVERS_FILE" "" "${CURRENT_SERVER:-}" \
-        || error "Manual rescan found no reachable DNS resolvers"
+      if [[ "$scan_source" == "file" ]]; then
+        validate_dns_file_or_error "$scan_file"
+        refresh_resolver_candidates_file "$DOMAIN" "$SERVERS_FILE" "$scan_file" "${CURRENT_SERVER:-}" \
+          || error "Manual rescan found no reachable DNS resolvers"
+      else
+        refresh_resolver_candidates_file "$DOMAIN" "$SERVERS_FILE" "" "${CURRENT_SERVER:-}" \
+          || error "Manual rescan found no reachable DNS resolvers"
+      fi
     fi
   else
     [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
@@ -3436,7 +3487,11 @@ cmd_rescan() {
   local pre_probe_count
   pre_probe_count=$(wc -l <"$SERVERS_FILE")
   if [[ "$transport" == "dnstt" ]]; then
-    log "DNSTT candidate refresh produced ${pre_probe_count} reachable DNS resolvers before data-path probe"
+    if [[ "$scan_dnstt_mode" == "deep" ]]; then
+      log "DNSTT deep scan produced ${pre_probe_count} verified resolvers before DNSTT data-path probe"
+    else
+      log "DNSTT candidate refresh produced ${pre_probe_count} reachable DNS resolvers before data-path probe"
+    fi
   else
     log "DNS scan produced ${pre_probe_count} verified resolvers before transport probe"
   fi
@@ -3721,6 +3776,7 @@ SCAN_MODE=fast
 SCAN_WORKERS=500
 SCAN_TIMEOUT=2s
 SCAN_THRESHOLD=0
+SCAN_DNSTT_MODE=candidate
 SSH_AUTH_ENABLED=false
 SSH_AUTH_USER=
 SSH_PASS_B64=
@@ -3996,15 +4052,43 @@ cmd_instance_rescan() {
   local scan_workers="${SCAN_WORKERS:-500}"
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-0}"
+  local scan_dnstt_mode="${SCAN_DNSTT_MODE:-candidate}"
 
   if [[ "$transport" == "dnstt" ]]; then
-    if [[ "$scan_source" == "file" ]]; then
-      validate_dns_file_or_error "$scan_file"
-      refresh_resolver_candidates_file "$DOMAIN" "$servers_file" "$scan_file" "${CURRENT_SERVER:-}" \
-        || error "Manual rescan found no reachable DNS resolvers for instance '$instance'"
+    if [[ "$scan_dnstt_mode" == "deep" ]]; then
+      [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
+      ensure_slipstream_client_binary
+      ensure_dnstt_client_binary
+      local dnscan_args=(
+        --domain "$DOMAIN"
+        --data-dir "$DNSCAN_DIR/data"
+        --output "$servers_file"
+        --verify "$SLIPSTREAM_CLIENT_BIN"
+      )
+
+      if [[ "$scan_source" == "file" ]]; then
+        validate_dns_file_or_error "$scan_file"
+        dnscan_args+=(--file "$scan_file")
+      else
+        dnscan_args+=(
+          --country "${SCAN_COUNTRY:-ir}"
+          --mode "${SCAN_MODE:-fast}"
+        )
+      fi
+      dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
+
+      log "Running DNSTT deep scan for instance '$instance' (dnscan + DNSTT probe)..."
+      "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+      [[ -s "$servers_file" ]] || error "DNSTT deep scan found no verified DNS servers for instance '$instance'"
     else
-      refresh_resolver_candidates_file "$DOMAIN" "$servers_file" "" "${CURRENT_SERVER:-}" \
-        || error "Manual rescan found no reachable DNS resolvers for instance '$instance'"
+      if [[ "$scan_source" == "file" ]]; then
+        validate_dns_file_or_error "$scan_file"
+        refresh_resolver_candidates_file "$DOMAIN" "$servers_file" "$scan_file" "${CURRENT_SERVER:-}" \
+          || error "Manual rescan found no reachable DNS resolvers for instance '$instance'"
+      else
+        refresh_resolver_candidates_file "$DOMAIN" "$servers_file" "" "${CURRENT_SERVER:-}" \
+          || error "Manual rescan found no reachable DNS resolvers for instance '$instance'"
+      fi
     fi
   else
     [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
@@ -4035,7 +4119,11 @@ cmd_instance_rescan() {
   local pre_probe_count
   pre_probe_count=$(wc -l <"$servers_file")
   if [[ "$transport" == "dnstt" ]]; then
-    log "DNSTT candidate refresh for instance '$instance' produced ${pre_probe_count} reachable resolvers before data-path probe"
+    if [[ "$scan_dnstt_mode" == "deep" ]]; then
+      log "DNSTT deep scan for instance '$instance' produced ${pre_probe_count} verified resolvers before DNSTT data-path probe"
+    else
+      log "DNSTT candidate refresh for instance '$instance' produced ${pre_probe_count} reachable resolvers before data-path probe"
+    fi
   else
     log "DNS scan for instance '$instance' produced ${pre_probe_count} verified resolvers before transport probe"
   fi
