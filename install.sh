@@ -3034,6 +3034,10 @@ cmd_client() {
     fi
   fi
 
+  if ! filter_servers_by_data_path "$domain" "$SERVERS_FILE" "$client_transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"; then
+    error "No DNS resolvers passed transport data-path validation for ${domain}"
+  fi
+
   local server_count
   server_count=$(wc -l <"$SERVERS_FILE")
   log "Found $server_count resolver candidates"
@@ -3419,6 +3423,10 @@ cmd_rescan() {
     log "Running manual DNS rescan..."
     "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
     [[ -s "$SERVERS_FILE" ]] || error "Manual rescan found no verified DNS servers"
+  fi
+
+  if ! filter_servers_by_data_path "$DOMAIN" "$SERVERS_FILE" "$transport" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"; then
+    error "No resolver passed transport data-path validation after manual rescan"
   fi
 
   local best_server best_latency
@@ -3996,6 +4004,10 @@ cmd_instance_rescan() {
     log "Running manual DNS rescan for instance '$instance'..."
     "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
     [[ -s "$servers_file" ]] || error "Manual rescan found no verified DNS servers for instance '$instance'"
+  fi
+
+  if ! filter_servers_by_data_path "$DOMAIN" "$servers_file" "$transport" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"; then
+    error "No resolver passed transport data-path validation for instance '$instance'"
   fi
 
   local best_server best_latency
@@ -6302,6 +6314,42 @@ probe_tunnel_data_path() {
   rm -f "$probe_log"
 
   ((ok == 1))
+}
+
+filter_servers_by_data_path() {
+  local domain="$1" file="$2"
+  local transport="${3:-${DNSTM_TRANSPORT:-slipstream}}"
+  local dnstt_pubkey="${4:-${DNSTM_DNSTT_PUBKEY:-}}"
+  local slipstream_cert="${5:-${DNSTM_SLIPSTREAM_CERT:-}}"
+  local dnstt_bind_host="${6:-${DNSTT_BIND_HOST:-127.0.0.1}}"
+  local tmp server checked=0 passed=0
+
+  [[ -f "$file" ]] || return 1
+  validate_transport_or_error "$transport"
+
+  tmp=$(mktemp /tmp/slipstream-path-filter.XXXXXX.txt)
+
+  while IFS= read -r server; do
+    [[ -n "$server" ]] || continue
+    is_valid_ipv4 "$server" || continue
+    checked=$((checked + 1))
+
+    resolver_supports_tunnel_domain "$server" "$domain" || continue
+    if probe_tunnel_data_path "$server" "$domain" "$transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"; then
+      echo "$server" >>"$tmp"
+      passed=$((passed + 1))
+    fi
+  done <"$file"
+
+  if [[ "$passed" -gt 0 ]]; then
+    mv "$tmp" "$file"
+    log "Resolver data-path validation: ${passed}/${checked} passed (${transport})"
+    return 0
+  fi
+
+  rm -f "$tmp"
+  warn "Resolver data-path validation: 0/${checked} passed (${transport})"
+  return 1
 }
 
 test_dns_latency() {
