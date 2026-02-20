@@ -2623,12 +2623,18 @@ prompt_scan_settings_for_profile() {
     echo ""
 
     if [[ "$transport_mode" == "dnstt" ]]; then
+      local mode_input=""
       while true; do
         prompt_read input "DNSTT scan mode [candidate/deep] [$scan_dnstt_mode]: "
         [[ -z "$input" ]] && break
-        case "$input" in
-        candidate | deep)
-          scan_dnstt_mode="$input"
+        mode_input=$(printf '%s' "$input" | tr -d '\r' | tr '[:upper:]' '[:lower:]')
+        case "$mode_input" in
+        candidate | candidate*)
+          scan_dnstt_mode="candidate"
+          break
+          ;;
+        deep | deep*)
+          scan_dnstt_mode="deep"
           break
           ;;
         *)
@@ -2643,12 +2649,18 @@ prompt_scan_settings_for_profile() {
       scan_source="generated"
       echo "DNSTT deep mode: source forced to 'generated' (internet-wide)."
     else
+      local source_input=""
       while true; do
         prompt_read input "Scan source [generated/file] [$scan_source]: "
         [[ -z "$input" ]] && break
-        case "$input" in
-        generated | file)
-          scan_source="$input"
+        source_input=$(printf '%s' "$input" | tr -d '\r' | tr '[:upper:]' '[:lower:]')
+        case "$source_input" in
+        generated | generated*)
+          scan_source="generated"
+          break
+          ;;
+        file | file*)
+          scan_source="file"
           break
           ;;
         *)
