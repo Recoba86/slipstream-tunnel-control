@@ -736,9 +736,14 @@ refresh_resolver_candidates_file() {
 
 prompt_instance_resolver_or_error() {
   local out_var="$1" domain="$2" choice="" candidate_resolver="" latency=""
+  local transport="${3:-${DNSTM_TRANSPORT:-slipstream}}"
+  local dnstt_pubkey="${4:-${DNSTM_DNSTT_PUBKEY:-}}"
+  local slipstream_cert="${5:-${DNSTM_SLIPSTREAM_CERT:-}}"
+  local dnstt_bind_host="${6:-${DNSTT_BIND_HOST:-127.0.0.1}}"
   local candidates=()
 
   [[ -n "$domain" ]] || error "Internal error: domain is required for resolver selection"
+  validate_transport_or_error "$transport"
 
   while IFS= read -r candidate_resolver; do
     [[ -n "$candidate_resolver" ]] || continue
@@ -791,6 +796,10 @@ prompt_instance_resolver_or_error() {
         warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Choose another resolver."
         continue
       fi
+      if ! probe_tunnel_data_path "$candidate_resolver" "$domain" "$transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"; then
+        warn "Resolver $candidate_resolver failed transport data-path probe (${transport}). Choose another resolver."
+        continue
+      fi
       printf -v "$out_var" '%s' "$candidate_resolver"
       return 0
     done
@@ -801,6 +810,10 @@ prompt_instance_resolver_or_error() {
     validate_ipv4_or_error "$candidate_resolver"
     if command -v dig &>/dev/null && ! resolver_supports_tunnel_domain "$candidate_resolver" "$domain"; then
       warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Choose another resolver."
+      continue
+    fi
+    if ! probe_tunnel_data_path "$candidate_resolver" "$domain" "$transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"; then
+      warn "Resolver $candidate_resolver failed transport data-path probe (${transport}). Choose another resolver."
       continue
     fi
     printf -v "$out_var" '%s' "$candidate_resolver"
@@ -2464,20 +2477,59 @@ default_instance_ssh_bridge_port() {
 
 find_best_server() {
   local domain="$1" file="$2"
-  local best_server="" best_latency=9999
+  local transport="${3:-${DNSTM_TRANSPORT:-slipstream}}"
+  local dnstt_pubkey="${4:-${DNSTM_DNSTT_PUBKEY:-}}"
+  local slipstream_cert="${5:-${DNSTM_SLIPSTREAM_CERT:-}}"
+  local dnstt_bind_host="${6:-${DNSTT_BIND_HOST:-127.0.0.1}}"
+  local ranked_tmp sorted_tmp
   local server lat
+  local best_server="" best_latency=9999
+  local attempts=0
+  local probe_attempted=0
+
+  validate_transport_or_error "$transport"
+
+  ranked_tmp=$(mktemp /tmp/slipstream-ranked.XXXXXX)
+  sorted_tmp=$(mktemp /tmp/slipstream-ranked-sorted.XXXXXX)
 
   while IFS= read -r server; do
     [[ -z "$server" ]] && continue
     is_valid_ipv4 "$server" || continue
     lat=$(test_dns_latency "$server" "$domain" || echo "9999")
-    if ((lat < best_latency)); then
-      best_latency="$lat"
-      best_server="$server"
-    fi
+    printf "%s %s\n" "$lat" "$server" >>"$ranked_tmp"
   done <"$file"
 
+  if [[ ! -s "$ranked_tmp" ]]; then
+    rm -f "$ranked_tmp" "$sorted_tmp"
+    return 1
+  fi
+
+  sort -n "$ranked_tmp" >"$sorted_tmp"
+  read -r best_latency best_server <"$sorted_tmp"
+
+  # Run real transport-path checks on top fast candidates only.
+  while IFS= read -r lat server; do
+    [[ -n "$server" ]] || continue
+    [[ "$lat" =~ ^[0-9]+$ ]] || continue
+    ((lat < 1000)) || continue
+
+    attempts=$((attempts + 1))
+    ((attempts <= 4)) || break
+    probe_attempted=1
+
+    if probe_tunnel_data_path "$server" "$domain" "$transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"; then
+      rm -f "$ranked_tmp" "$sorted_tmp"
+      echo "$server $lat"
+      return 0
+    fi
+  done <"$sorted_tmp"
+
+  rm -f "$ranked_tmp" "$sorted_tmp"
   [[ -n "$best_server" ]] || return 1
+  if ((probe_attempted == 1)); then
+    echo "$best_server 9999"
+    return 0
+  fi
   echo "$best_server $best_latency"
 }
 
@@ -2926,12 +2978,13 @@ cmd_client() {
   server_count=$(wc -l <"$SERVERS_FILE")
   log "Found $server_count resolver candidates"
 
-  read -r best_server best_latency <<<"$(find_best_server "$domain" "$SERVERS_FILE")"
+  read -r best_server best_latency <<<"$(find_best_server "$domain" "$SERVERS_FILE" "$client_transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host")"
   [[ -n "$best_server" ]] || error "Could not choose a working DNS server"
-  log "Using DNS server: $best_server (${best_latency}ms)"
+  [[ "$best_latency" =~ ^[0-9]+$ ]] || best_latency=9999
   if [[ "$best_latency" -ge 1000 ]]; then
-    warn "Selected resolver did not answer tunnel probe quickly (${best_latency}ms). You may need to switch resolver later."
+    error "No resolver passed transport data-path validation for ${domain}. Update resolver candidates and retry."
   fi
+  log "Using DNS server: $best_server (${best_latency}ms)"
 
   local client_transport_port="$port"
   local ssh_pass_b64=""
@@ -3311,6 +3364,8 @@ cmd_rescan() {
   local best_server best_latency
   read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$SERVERS_FILE")"
   [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan"
+  [[ "$best_latency" =~ ^[0-9]+$ ]] || best_latency=9999
+  [[ "$best_latency" -lt 1000 ]] || error "No resolver passed transport data-path validation after manual rescan"
 
   set_config_value "CURRENT_SERVER" "$best_server" "$CONFIG_FILE"
   local transport_port
@@ -3547,7 +3602,7 @@ cmd_instance_add() {
       dnstt_ssh_pass_b64=$(printf '%s' "$dnstt_ssh_pass" | base64 | tr -d '\n')
     fi
   fi
-  prompt_instance_resolver_or_error resolver "$domain"
+  prompt_instance_resolver_or_error resolver "$domain" "$transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"
 
   mkdir -p "$instance_path"
   printf '%s\n' "$resolver" >"$servers_file"
@@ -3813,6 +3868,9 @@ cmd_instance_select_server() {
   ((choice >= 1 && choice <= ${#servers[@]})) || error "Selection out of range: $choice"
 
   local selected="${servers[$((choice - 1))]}"
+  if ! probe_tunnel_data_path "$selected" "$DOMAIN" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"; then
+    error "Selected resolver $selected failed transport data-path validation. Pick another resolver."
+  fi
   set_config_value "CURRENT_SERVER" "$selected" "$cfg"
   write_instance_client_service "$instance" "$selected" "$DOMAIN" "$PORT" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
   systemctl daemon-reload
@@ -3883,6 +3941,8 @@ cmd_instance_rescan() {
   local best_server best_latency
   read -r best_server best_latency <<<"$(find_best_server "$DOMAIN" "$servers_file")"
   [[ -n "$best_server" ]] || error "No usable DNS server found after manual rescan for '$instance'"
+  [[ "$best_latency" =~ ^[0-9]+$ ]] || best_latency=9999
+  [[ "$best_latency" -lt 1000 ]] || error "No resolver passed transport data-path validation for instance '$instance'"
 
   set_config_value "CURRENT_SERVER" "$best_server" "$cfg"
   write_instance_client_service "$instance" "$best_server" "$DOMAIN" "$PORT" "$transport" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
@@ -3944,7 +4004,7 @@ cmd_instance_edit() {
     error "Port $new_port is already in use on this host"
   fi
   if [[ -z "$new_server" ]]; then
-    prompt_instance_resolver_or_error new_server "$new_domain"
+    prompt_instance_resolver_or_error new_server "$new_domain" "$new_transport" "$new_dnstt_pubkey" "$new_slipstream_cert" "$new_dnstt_bind_host"
   else
     validate_ipv4_or_error "$new_server"
   fi
@@ -4284,6 +4344,9 @@ cmd_select_server() {
   ((choice >= 1 && choice <= ${#servers[@]})) || error "Selection out of range: $choice"
 
   local selected="${servers[$((choice - 1))]}"
+  if ! probe_tunnel_data_path "$selected" "$DOMAIN" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"; then
+    error "Selected resolver $selected failed transport data-path validation. Pick another resolver."
+  fi
   set_config_value "CURRENT_SERVER" "$selected" "$CONFIG_FILE"
   local transport_port
   transport_port=$(client_transport_port_from_config)
@@ -4452,7 +4515,10 @@ cmd_edit_client() {
   if [[ -n "$new_server" ]]; then
     validate_ipv4_or_error "$new_server"
   elif [[ -s "$SERVERS_FILE" ]]; then
-    read -r new_server _ <<<"$(find_best_server "$new_domain" "$SERVERS_FILE")"
+    local auto_latency
+    read -r new_server auto_latency <<<"$(find_best_server "$new_domain" "$SERVERS_FILE" "$new_transport" "$new_dnstt_pubkey" "$new_slipstream_cert" "$new_dnstt_bind_host")"
+    [[ "$auto_latency" =~ ^[0-9]+$ ]] || auto_latency=9999
+    [[ "$auto_latency" -lt 1000 ]] || error "No resolver passed transport data-path validation for ${new_domain}. Run rescan with better candidates."
   fi
   [[ -n "$new_server" ]] || error "No DNS resolver available. Run 'slipstream-tunnel rescan' first."
   if [[ "$new_transport" == "dnstt" ]]; then
@@ -6077,6 +6143,105 @@ resolver_supports_tunnel_domain() {
   NOERROR | NXDOMAIN) return 0 ;;
   *) return 1 ;;
   esac
+}
+
+pick_probe_port() {
+  local attempt port
+  for attempt in {1..40}; do
+    port=$((20000 + (RANDOM % 25000)))
+    if command -v ss &>/dev/null; then
+      if ! ss -lntH "sport = :$port" 2>/dev/null | grep -q .; then
+        echo "$port"
+        return 0
+      fi
+    else
+      echo "$port"
+      return 0
+    fi
+  done
+  return 1
+}
+
+probe_tunnel_data_path() {
+  local server="$1" domain="$2"
+  local transport="${3:-${DNSTM_TRANSPORT:-slipstream}}"
+  local dnstt_pubkey="${4:-${DNSTM_DNSTT_PUBKEY:-}}"
+  local slipstream_cert="${5:-${DNSTM_SLIPSTREAM_CERT:-}}"
+  local dnstt_bind_host="${6:-${DNSTT_BIND_HOST:-127.0.0.1}}"
+  local probe_port probe_log probe_pid=0 listening=0
+  local -a cmd=()
+
+  validate_transport_or_error "$transport"
+
+  probe_port=$(pick_probe_port) || return 1
+  probe_log=$(mktemp /tmp/slipstream-path-probe.XXXXXX.log)
+
+  if [[ "$transport" == "dnstt" ]]; then
+    [[ -x "$DNSTT_CLIENT_BIN" ]] || {
+      rm -f "$probe_log"
+      return 1
+    }
+    [[ -n "$dnstt_pubkey" ]] || {
+      rm -f "$probe_log"
+      return 1
+    }
+    cmd=("$DNSTT_CLIENT_BIN" -udp "${server}:53" -pubkey "$dnstt_pubkey" "$domain" "127.0.0.1:${probe_port}")
+  else
+    [[ -x "$SLIPSTREAM_CLIENT_BIN" ]] || {
+      rm -f "$probe_log"
+      return 1
+    }
+    cmd=("$SLIPSTREAM_CLIENT_BIN" --resolver "${server}:53" --domain "$domain" --tcp-listen-port "$probe_port")
+    [[ -n "$slipstream_cert" ]] && cmd+=(--cert "$slipstream_cert")
+  fi
+
+  "${cmd[@]}" >"$probe_log" 2>&1 &
+  probe_pid=$!
+
+  for _ in {1..40}; do
+    if ! kill -0 "$probe_pid" 2>/dev/null; then
+      break
+    fi
+    if ss -lntH "sport = :$probe_port" 2>/dev/null | grep -q .; then
+      listening=1
+      break
+    fi
+    sleep 0.2
+  done
+
+  if ((listening == 1)); then
+    for _ in {1..2}; do
+      if command -v timeout &>/dev/null; then
+        timeout 2 bash -lc "exec 3<>/dev/tcp/127.0.0.1/${probe_port}; printf 'probe' >&3; sleep 0.2; exec 3<&-; exec 3>&-" >/dev/null 2>&1 || true
+      else
+        bash -lc "exec 3<>/dev/tcp/127.0.0.1/${probe_port}; printf 'probe' >&3; sleep 0.2; exec 3<&-; exec 3>&-" >/dev/null 2>&1 || true
+      fi
+      sleep 0.2
+    done
+  fi
+  sleep 1
+
+  local ok=1
+  if ((listening == 0)); then
+    ok=0
+  elif [[ "$transport" == "dnstt" ]]; then
+    grep -q 'begin session' "$probe_log" || ok=0
+    grep -Eq 'begin stream|end stream' "$probe_log" || ok=0
+    grep -q 'io: read/write on closed pipe' "$probe_log" && ok=0
+  else
+    grep -q 'Connection ready' "$probe_log" || ok=0
+    if grep -Eq 'Path for resolver .* became unavailable|Connection closed; reconnecting|ERROR connection flow blocked|WATCHDOG: main loop stalled' "$probe_log"; then
+      ok=0
+    fi
+  fi
+
+  if ((probe_pid > 0)) && kill -0 "$probe_pid" 2>/dev/null; then
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+  fi
+  rm -f "$probe_log"
+
+  ((ok == 1))
 }
 
 test_dns_latency() {
