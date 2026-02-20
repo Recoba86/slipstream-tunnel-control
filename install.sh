@@ -2546,6 +2546,7 @@ find_best_server() {
   local best_server="" best_latency=9999
   local attempts=0
   local probe_attempted=0
+  local selected_server="" selected_latency=""
 
   validate_transport_or_error "$transport"
 
@@ -2577,13 +2578,17 @@ find_best_server() {
     probe_attempted=1
 
     if probe_tunnel_data_path "$server" "$domain" "$transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"; then
-      rm -f "$ranked_tmp" "$sorted_tmp"
-      echo "$server $lat"
-      return 0
+      selected_server="$server"
+      selected_latency="$lat"
+      break
     fi
   done <"$sorted_tmp"
 
   rm -f "$ranked_tmp" "$sorted_tmp"
+  if [[ -n "$selected_server" ]]; then
+    echo "$selected_server $selected_latency"
+    return 0
+  fi
   [[ -n "$best_server" ]] || return 1
   if ((probe_attempted == 1)); then
     echo "$best_server 9999"
@@ -6531,19 +6536,7 @@ filter_servers_by_data_path() {
 extract_dnscan_scanned_count() {
   local log_file="$1"
   [[ -f "$log_file" ]] || return 0
-  awk '
-    {
-      line=tolower($0)
-      if (match(line, /(scanned|tested|checked|processed)[^0-9]*([0-9]+)/, m)) {
-        v=m[2]
-      } else if (match(line, /([0-9]+)[^0-9]*(scanned|tested|checked|processed)/, m)) {
-        v=m[1]
-      }
-    }
-    END {
-      if (v != "") print v
-    }
-  ' "$log_file" 2>/dev/null || true
+  sed -n -E 's/.*[Ss]canned:[[:space:]]*([0-9]+).*/\1/p' "$log_file" | tail -n1
 }
 
 run_dnscan_with_live_progress() {
@@ -6556,7 +6549,10 @@ run_dnscan_with_live_progress() {
   : >"$output_file"
   echo "[scan] ${label}: started"
 
-  "$@" > >(tee "$log_file") 2> >(tee -a "$log_file" >&2) &
+  (
+    set -o pipefail
+    "$@" 2>&1 | tr '\r' '\n' | tee "$log_file"
+  ) &
   dnscan_pid=$!
 
   (
