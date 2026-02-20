@@ -3065,7 +3065,8 @@ cmd_client() {
       fi
     fi
 
-    "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+    run_dnscan_with_live_progress "Initial DNS scan" "$SERVERS_FILE" "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}" \
+      || error "dnscan execution failed"
 
     if [[ ! -s "$SERVERS_FILE" ]]; then
       error "No DNS servers passed verification. Is your server running correctly?"
@@ -3456,7 +3457,8 @@ cmd_rescan() {
       dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
 
       log "Running DNSTT deep scan (dnscan + DNSTT probe)..."
-      "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+      run_dnscan_with_live_progress "DNSTT deep rescan" "$SERVERS_FILE" "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}" \
+        || error "dnscan execution failed in DNSTT deep mode"
       [[ -s "$SERVERS_FILE" ]] || error "DNSTT deep scan found no verified DNS servers"
     else
       if [[ "$scan_source" == "file" ]]; then
@@ -3490,7 +3492,8 @@ cmd_rescan() {
     dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
 
     log "Running manual DNS rescan..."
-    "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+    run_dnscan_with_live_progress "Manual DNS rescan" "$SERVERS_FILE" "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}" \
+      || error "dnscan execution failed during manual rescan"
     [[ -s "$SERVERS_FILE" ]] || error "Manual rescan found no verified DNS servers"
   fi
 
@@ -4090,7 +4093,8 @@ cmd_instance_rescan() {
       dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
 
       log "Running DNSTT deep scan for instance '$instance' (dnscan + DNSTT probe)..."
-      "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+      run_dnscan_with_live_progress "DNSTT deep rescan ($instance)" "$servers_file" "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}" \
+        || error "dnscan execution failed for instance '$instance' in DNSTT deep mode"
       [[ -s "$servers_file" ]] || error "DNSTT deep scan found no verified DNS servers for instance '$instance'"
     else
       if [[ "$scan_source" == "file" ]]; then
@@ -4124,7 +4128,8 @@ cmd_instance_rescan() {
     dnscan_args+=(--workers "$scan_workers" --timeout "$scan_timeout" --threshold "$scan_threshold")
 
     log "Running manual DNS rescan for instance '$instance'..."
-    "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}"
+    run_dnscan_with_live_progress "Manual DNS rescan ($instance)" "$servers_file" "$DNSCAN_DIR/dnscan" "${dnscan_args[@]}" \
+      || error "dnscan execution failed for instance '$instance'"
     [[ -s "$servers_file" ]] || error "Manual rescan found no verified DNS servers for instance '$instance'"
   fi
 
@@ -6468,12 +6473,14 @@ filter_servers_by_data_path() {
   local dnstt_pubkey="${4:-${DNSTM_DNSTT_PUBKEY:-}}"
   local slipstream_cert="${5:-${DNSTM_SLIPSTREAM_CERT:-}}"
   local dnstt_bind_host="${6:-${DNSTT_BIND_HOST:-127.0.0.1}}"
-  local tmp server checked=0 passed=0
+  local tmp server checked=0 passed=0 total=0
 
   [[ -f "$file" ]] || return 1
   validate_transport_or_error "$transport"
 
   tmp=$(mktemp /tmp/slipstream-path-filter.XXXXXX.txt)
+  total=$(awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {c++} END {print c+0}' "$file")
+  ((total > 0)) || total=0
 
   while IFS= read -r server; do
     [[ -n "$server" ]] || continue
@@ -6484,6 +6491,11 @@ filter_servers_by_data_path() {
     if probe_tunnel_data_path "$server" "$domain" "$transport" "$dnstt_pubkey" "$slipstream_cert" "$dnstt_bind_host"; then
       echo "$server" >>"$tmp"
       passed=$((passed + 1))
+    fi
+    if ((total > 0)); then
+      echo "[probe] transport=${transport} checked=${checked}/${total} confirmed=${passed}"
+    else
+      echo "[probe] transport=${transport} checked=${checked} confirmed=${passed}"
     fi
   done <"$file"
 
@@ -6496,6 +6508,74 @@ filter_servers_by_data_path() {
   rm -f "$tmp"
   warn "Resolver data-path validation: 0/${checked} passed (${transport})"
   return 1
+}
+
+extract_dnscan_scanned_count() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 0
+  awk '
+    {
+      line=tolower($0)
+      if (match(line, /(scanned|tested|checked|processed)[^0-9]*([0-9]+)/, m)) {
+        v=m[2]
+      } else if (match(line, /([0-9]+)[^0-9]*(scanned|tested|checked|processed)/, m)) {
+        v=m[1]
+      }
+    }
+    END {
+      if (v != "") print v
+    }
+  ' "$log_file" 2>/dev/null || true
+}
+
+run_dnscan_with_live_progress() {
+  local label="$1" output_file="$2"
+  shift 2
+  local log_file dnscan_pid monitor_pid
+  local verified=0 scanned="?" rc=0
+
+  log_file=$(mktemp /tmp/dnscan-live.XXXXXX.log)
+  : >"$output_file"
+  echo "[scan] ${label}: started"
+
+  "$@" > >(tee "$log_file") 2> >(tee -a "$log_file" >&2) &
+  dnscan_pid=$!
+
+  (
+    while kill -0 "$dnscan_pid" 2>/dev/null; do
+      if [[ -f "$output_file" ]]; then
+        verified=$(wc -l <"$output_file" 2>/dev/null || echo 0)
+      else
+        verified=0
+      fi
+      scanned=$(extract_dnscan_scanned_count "$log_file")
+      [[ -n "$scanned" ]] || scanned="?"
+      echo "[scan] ${label}: scanned=${scanned} confirmed=${verified}"
+      sleep 2
+    done
+  ) &
+  monitor_pid=$!
+
+  if wait "$dnscan_pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+
+  if [[ -f "$output_file" ]]; then
+    verified=$(wc -l <"$output_file" 2>/dev/null || echo 0)
+  else
+    verified=0
+  fi
+  scanned=$(extract_dnscan_scanned_count "$log_file")
+  [[ -n "$scanned" ]] || scanned="?"
+  echo "[scan] ${label}: completed scanned=${scanned} confirmed=${verified}"
+
+  rm -f "$log_file"
+  return "$rc"
 }
 
 test_dns_latency() {
