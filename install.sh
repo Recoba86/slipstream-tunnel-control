@@ -2636,34 +2636,32 @@ prompt_scan_settings_for_profile() {
           ;;
         esac
       done
-
-      # Deep mode is intended for wide scan by default.
-      if [[ "$scan_dnstt_mode" == "deep" && "$scan_source" == "file" ]]; then
-        scan_source="generated"
-      fi
     fi
 
-    while true; do
-      prompt_read input "Scan source [generated/file] [$scan_source]: "
-      [[ -z "$input" ]] && break
-      case "$input" in
-      generated | file)
-        scan_source="$input"
-        break
-        ;;
-      *)
-        warn "Invalid scan source: $input"
-        ;;
-      esac
-    done
+    if [[ "$transport_mode" == "dnstt" && "$scan_dnstt_mode" == "deep" ]]; then
+      # Force internet-wide path for deep mode to avoid silently reusing file pool.
+      scan_source="generated"
+      echo "DNSTT deep mode: source forced to 'generated' (internet-wide)."
+    else
+      while true; do
+        prompt_read input "Scan source [generated/file] [$scan_source]: "
+        [[ -z "$input" ]] && break
+        case "$input" in
+        generated | file)
+          scan_source="$input"
+          break
+          ;;
+        *)
+          warn "Invalid scan source: $input"
+          ;;
+        esac
+      done
+    fi
 
     if [[ "$scan_source" == "file" ]]; then
       prompt_read input "DNS file path [$scan_file]: "
       [[ -n "$input" ]] && scan_file="$input"
       [[ -n "$scan_file" ]] || error "DNS file path is required when scan source is 'file'"
-      if [[ "$transport_mode" == "dnstt" && "$scan_dnstt_mode" == "deep" ]]; then
-        warn "DNSTT deep + file mode scans only that file list (not internet-wide)."
-      fi
     else
       if [[ "$transport_mode" != "dnstt" || "$scan_dnstt_mode" == "deep" ]]; then
         echo "Modes: list | fast | medium | all"
@@ -3430,6 +3428,10 @@ cmd_rescan() {
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-0}"
   local scan_dnstt_mode="${SCAN_DNSTT_MODE:-candidate}"
+  if [[ "$transport" == "dnstt" && "$scan_dnstt_mode" == "deep" && "$scan_source" == "file" ]]; then
+    scan_source="generated"
+    set_config_value "SCAN_SOURCE" "$scan_source" "$CONFIG_FILE"
+  fi
 
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_dnstt_mode" == "deep" ]]; then
@@ -4066,6 +4068,10 @@ cmd_instance_rescan() {
   local scan_timeout="${SCAN_TIMEOUT:-2s}"
   local scan_threshold="${SCAN_THRESHOLD:-0}"
   local scan_dnstt_mode="${SCAN_DNSTT_MODE:-candidate}"
+  if [[ "$transport" == "dnstt" && "$scan_dnstt_mode" == "deep" && "$scan_source" == "file" ]]; then
+    scan_source="generated"
+    set_config_value "SCAN_SOURCE" "$scan_source" "$cfg"
+  fi
 
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_dnstt_mode" == "deep" ]]; then
