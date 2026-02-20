@@ -2534,7 +2534,7 @@ find_best_server() {
 }
 
 has_interactive_tty() {
-  [[ -t 0 ]] || ([[ -e /dev/tty ]] && : </dev/tty 2>/dev/null)
+  [[ -t 0 && -t 1 ]]
 }
 
 prompt_scan_settings_for_profile() {
