@@ -723,6 +723,7 @@ refresh_resolver_candidates_file() {
     [[ -n "$candidate" ]] || continue
     is_valid_ipv4 "$candidate" || continue
     resolver_answers_dns_queries "$candidate" || continue
+    resolver_supports_tunnel_domain "$candidate" "$domain" || continue
     echo "$candidate"
   done | awk '!seen[$0]++' >"$tmp"
 
@@ -786,8 +787,8 @@ prompt_instance_resolver_or_error() {
         candidate_resolver="${candidates[$((choice - 1))]}"
       fi
 
-      if command -v dig &>/dev/null && ! resolver_answers_dns_queries "$candidate_resolver"; then
-        warn "Resolver $candidate_resolver is unreachable for DNS queries. Choose another resolver."
+      if command -v dig &>/dev/null && ! resolver_supports_tunnel_domain "$candidate_resolver" "$domain"; then
+        warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Choose another resolver."
         continue
       fi
       printf -v "$out_var" '%s' "$candidate_resolver"
@@ -798,8 +799,8 @@ prompt_instance_resolver_or_error() {
   while true; do
     prompt_read candidate_resolver "DNS resolver IP (server IP): "
     validate_ipv4_or_error "$candidate_resolver"
-    if command -v dig &>/dev/null && ! resolver_answers_dns_queries "$candidate_resolver"; then
-      warn "Resolver $candidate_resolver is unreachable for DNS queries. Try another resolver."
+    if command -v dig &>/dev/null && ! resolver_supports_tunnel_domain "$candidate_resolver" "$domain"; then
+      warn "Resolver $candidate_resolver did not answer for $domain (dns=fail). Choose another resolver."
       continue
     fi
     printf -v "$out_var" '%s' "$candidate_resolver"
@@ -6054,22 +6055,40 @@ cmd_menu() {
   fi
 }
 
+resolver_answers_dns_queries() {
+  local server="$1"
+  command -v dig &>/dev/null || return 0
+  dig +short +time=2 +tries=1 "@$server" . NS &>/dev/null
+}
+
+resolver_supports_tunnel_domain() {
+  local server="$1" domain="$2"
+  local out status
+  command -v dig &>/dev/null || return 0
+  out=$(dig +time=2 +tries=1 "@$server" "$domain" TXT 2>&1 || true)
+  if printf '%s\n' "$out" | grep -Eq 'no servers could be reached|communications error|connection timed out|network is unreachable'; then
+    return 1
+  fi
+  if printf '%s\n' "$out" | grep -q 'EDE: 22 (No Reachable Authority)'; then
+    return 1
+  fi
+  status=$(printf '%s\n' "$out" | awk -F'status: ' '/status: /{split($2,a,","); print a[1]; exit}')
+  case "$status" in
+  NOERROR | NXDOMAIN) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 test_dns_latency() {
   local server="$1" domain="$2"
   local start end
   start=$(date +%s%N)
-  if dig +short +time=2 +tries=1 "@$server" "$domain" TXT &>/dev/null; then
+  if resolver_supports_tunnel_domain "$server" "$domain"; then
     end=$(date +%s%N)
     echo $(((end - start) / 1000000))
   else
     echo "9999"
   fi
-}
-
-resolver_answers_dns_queries() {
-  local server="$1"
-  command -v dig &>/dev/null || return 0
-  dig +short +time=2 +tries=1 "@$server" . NS &>/dev/null
 }
 
 setup_health_timer_named() {
