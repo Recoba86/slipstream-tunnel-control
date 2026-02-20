@@ -552,15 +552,15 @@ require_flag_value() {
 }
 
 prompt_read() {
-  local out_var="$1" prompt="$2" input=""
+  local out_var="$1" prompt="$2" reply=""
   if [[ -t 0 ]]; then
-    read -r -p "$prompt" input
+    read -r -p "$prompt" reply
   elif [[ -e /dev/tty ]] && : </dev/tty 2>/dev/null; then
-    read -r -p "$prompt" input </dev/tty
+    read -r -p "$prompt" reply </dev/tty
   else
     error "Interactive input required but no TTY is available. Run: curl ... -o /tmp/slipstream-install.sh && bash /tmp/slipstream-install.sh ..."
   fi
-  printf -v "$out_var" '%s' "$input"
+  printf -v "$out_var" '%s' "$reply"
 }
 
 is_valid_ipv4() {
