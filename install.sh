@@ -3453,13 +3453,11 @@ cmd_rescan() {
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_dnstt_mode" == "deep" ]]; then
       [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
-      ensure_slipstream_client_binary
       ensure_dnstt_client_binary
       local dnscan_args=(
         --domain "$DOMAIN"
         --data-dir "$DNSCAN_DIR/data"
         --output "$SERVERS_FILE"
-        --verify "$SLIPSTREAM_CLIENT_BIN"
       )
 
       if [[ "$scan_source" == "file" ]]; then
@@ -3520,7 +3518,7 @@ cmd_rescan() {
   pre_probe_count=$(wc -l <"$SERVERS_FILE")
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_dnstt_mode" == "deep" ]]; then
-      log "DNSTT deep scan produced ${pre_probe_count} verified resolvers before DNSTT data-path probe"
+      log "DNSTT deep scan produced ${pre_probe_count} DNS-responsive candidates before DNSTT data-path probe"
     else
       log "DNSTT candidate refresh produced ${pre_probe_count} reachable DNS resolvers before data-path probe"
     fi
@@ -4093,13 +4091,11 @@ cmd_instance_rescan() {
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_dnstt_mode" == "deep" ]]; then
       [[ -x "$DNSCAN_DIR/dnscan" ]] || error "dnscan binary not found: $DNSCAN_DIR/dnscan"
-      ensure_slipstream_client_binary
       ensure_dnstt_client_binary
       local dnscan_args=(
         --domain "$DOMAIN"
         --data-dir "$DNSCAN_DIR/data"
         --output "$servers_file"
-        --verify "$SLIPSTREAM_CLIENT_BIN"
       )
 
       if [[ "$scan_source" == "file" ]]; then
@@ -4160,7 +4156,7 @@ cmd_instance_rescan() {
   pre_probe_count=$(wc -l <"$servers_file")
   if [[ "$transport" == "dnstt" ]]; then
     if [[ "$scan_dnstt_mode" == "deep" ]]; then
-      log "DNSTT deep scan for instance '$instance' produced ${pre_probe_count} verified resolvers before DNSTT data-path probe"
+      log "DNSTT deep scan for instance '$instance' produced ${pre_probe_count} DNS-responsive candidates before DNSTT data-path probe"
     else
       log "DNSTT candidate refresh for instance '$instance' produced ${pre_probe_count} reachable resolvers before data-path probe"
     fi
