@@ -2622,7 +2622,7 @@ prompt_scan_settings_for_profile() {
     if [[ "$transport_mode" == "dnstt" ]]; then
       echo "DNSTT scan strategies:"
       echo "  candidate - refresh known resolvers + real data-path probe (fast)"
-      echo "  deep      - wide dnscan (slipstream verify) + real DNSTT data-path probe (slower)"
+      echo "  deep      - wide dnscan DNS benchmark + real DNSTT data-path probe (slower)"
     fi
     echo "Press Enter to keep current values."
     echo ""
@@ -6532,14 +6532,48 @@ filter_servers_by_data_path() {
 extract_dnscan_scanned_count() {
   local log_file="$1"
   [[ -f "$log_file" ]] || return 0
-  sed -n -E 's/.*[Ss]canned:[[:space:]]*([0-9]+).*/\1/p' "$log_file" | tail -n1
+  local scanned=""
+  scanned=$(tail -n 300 "$log_file" | sed -n -E 's/.*[Ss]canned:[[:space:]]*([0-9]+).*/\1/p' | tail -n1)
+  if [[ -z "$scanned" ]]; then
+    scanned=$(tail -n 300 "$log_file" | sed -n -E 's/.*[Ss]can:[[:space:]]*([0-9]+)\/([0-9]+).*/\1/p' | tail -n1)
+  fi
+  [[ -n "$scanned" ]] && echo "$scanned"
+}
+
+extract_dnscan_total_count() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 0
+  local total=""
+  total=$(tail -n 300 "$log_file" | sed -n -E 's/.*IPs to scan:[[:space:]]*([0-9]+).*/\1/p' | tail -n1)
+  if [[ -z "$total" ]]; then
+    total=$(tail -n 300 "$log_file" | sed -n -E 's/.*[Ss]can:[[:space:]]*([0-9]+)\/([0-9]+).*/\2/p' | tail -n1)
+  fi
+  [[ -n "$total" ]] && echo "$total"
+}
+
+extract_dnscan_found_count() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 0
+  tail -n 300 "$log_file" | sed -n -E 's/.*[Ff]ound:[[:space:]]*([0-9]+).*/\1/p' | tail -n1
+}
+
+extract_dnscan_verify_counts() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 0
+  local line=""
+  line=$(tail -n 400 "$log_file" | sed -n -E 's/.*Verifying:[[:space:]]*([0-9]+)\/([0-9]+)[[:space:]]*tested,[[:space:]]*([0-9]+)[[:space:]]*passed.*/\1 \2 \3/p' | tail -n1)
+  if [[ -z "$line" ]]; then
+    line=$(tail -n 400 "$log_file" | sed -n -E 's/.*Verify:[[:space:]]*([0-9]+)\/([0-9]+)[[:space:]]*\|[[:space:]]*Passed:[[:space:]]*([0-9]+).*/\1 \2 \3/p' | tail -n1)
+  fi
+  [[ -n "$line" ]] && echo "$line"
 }
 
 run_dnscan_with_live_progress() {
   local label="$1" output_file="$2"
   shift 2
   local log_file dnscan_pid monitor_pid
-  local verified=0 scanned="?" rc=0
+  local verified=0 scanned="?" total="?" found=0 rc=0
+  local verify_tested="" verify_total="" verify_passed="" verify_line=""
 
   log_file=$(mktemp /tmp/dnscan-live.XXXXXX.log)
   : >"$output_file"
@@ -6559,8 +6593,20 @@ run_dnscan_with_live_progress() {
         verified=0
       fi
       scanned=$(extract_dnscan_scanned_count "$log_file")
-      [[ -n "$scanned" ]] || scanned="?"
-      echo "[scan] ${label}: scanned=${scanned} confirmed=${verified}"
+      total=$(extract_dnscan_total_count "$log_file")
+      found=$(extract_dnscan_found_count "$log_file")
+      [[ -n "$total" ]] || total="?"
+      [[ -n "$found" ]] || found=0
+      if [[ -z "$scanned" ]]; then
+        [[ "$total" =~ ^[0-9]+$ ]] && scanned=0 || scanned="?"
+      fi
+      verify_line=$(extract_dnscan_verify_counts "$log_file")
+      if [[ -n "$verify_line" ]]; then
+        read -r verify_tested verify_total verify_passed <<<"$verify_line"
+        echo "[scan] ${label}: scanned=${scanned}/${total} found=${found} verify=${verify_tested}/${verify_total} passed=${verify_passed} confirmed=${verified}"
+      else
+        echo "[scan] ${label}: scanned=${scanned}/${total} found=${found} confirmed=${verified}"
+      fi
       sleep 2
     done
   ) &
@@ -6581,8 +6627,20 @@ run_dnscan_with_live_progress() {
     verified=0
   fi
   scanned=$(extract_dnscan_scanned_count "$log_file")
-  [[ -n "$scanned" ]] || scanned="?"
-  echo "[scan] ${label}: completed scanned=${scanned} confirmed=${verified}"
+  total=$(extract_dnscan_total_count "$log_file")
+  found=$(extract_dnscan_found_count "$log_file")
+  [[ -n "$total" ]] || total="?"
+  [[ -n "$found" ]] || found=0
+  if [[ -z "$scanned" ]]; then
+    [[ "$total" =~ ^[0-9]+$ ]] && scanned=0 || scanned="?"
+  fi
+  verify_line=$(extract_dnscan_verify_counts "$log_file")
+  if [[ -n "$verify_line" ]]; then
+    read -r verify_tested verify_total verify_passed <<<"$verify_line"
+    echo "[scan] ${label}: completed scanned=${scanned}/${total} found=${found} verify=${verify_tested}/${verify_total} passed=${verify_passed} confirmed=${verified}"
+  else
+    echo "[scan] ${label}: completed scanned=${scanned}/${total} found=${found} confirmed=${verified}"
+  fi
 
   rm -f "$log_file"
   return "$rc"
