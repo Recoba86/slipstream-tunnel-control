@@ -148,6 +148,10 @@ Options:
                       Server (dnstm core): optional Shadowsocks password for initial backend
   --dnstm-ss-method <method>
                       Server (dnstm core): Shadowsocks method (default: aes-256-gcm)
+  --dnstm-netmod-domain <domain>
+                      Server (dnstm core): optional extra domain for NetMod DNSTT-over-SSH tunnel
+  --dnstm-netmod-tag <tag>
+                      Server (dnstm core): optional NetMod tunnel tag (default: netmod-ssh)
   --ssh-auth-client   Client: use SSH username/password overlay
   --ssh-user <name>   Client: SSH username (with --ssh-auth-client)
   --ssh-pass <pass>   Client: SSH password (with --ssh-auth-client)
@@ -1088,6 +1092,18 @@ dnstm_setup_server_stack() {
   fi
 }
 
+dnstm_add_netmod_tunnel() {
+  local domain="$1"
+  local tunnel_tag="$2"
+  validate_domain_or_error "$domain"
+  [[ -n "$tunnel_tag" ]] || error "DNSTM NetMod tunnel tag cannot be empty"
+
+  # Keep reruns idempotent.
+  run_dnstm tunnel remove -t "$tunnel_tag" --force >/dev/null 2>&1 || true
+  run_dnstm tunnel add --transport dnstt --backend ssh --domain "$domain" -t "$tunnel_tag"
+  run_dnstm router start >/dev/null 2>&1 || true
+}
+
 should_auto_fallback_to_plus_for_arm() {
   local arch="$1"
   [[ "$arch" == "arm64" ]] || return 1
@@ -1955,6 +1971,9 @@ cmd_server() {
   local dnstm_router_mode="single"
   local dnstm_ss_password=""
   local dnstm_ss_method="aes-256-gcm"
+  local dnstm_netmod_setup=false
+  local dnstm_netmod_domain=""
+  local dnstm_netmod_tag="netmod-ssh"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2031,6 +2050,18 @@ cmd_server() {
     --dnstm-ss-method)
       require_flag_value "$1" "${2:-}"
       dnstm_ss_method="$2"
+      shift 2
+      ;;
+    --dnstm-netmod-domain)
+      require_flag_value "$1" "${2:-}"
+      dnstm_netmod_domain="$2"
+      dnstm_netmod_setup=true
+      shift 2
+      ;;
+    --dnstm-netmod-tag)
+      require_flag_value "$1" "${2:-}"
+      dnstm_netmod_tag="$2"
+      dnstm_netmod_setup=true
       shift 2
       ;;
     -h | --help)
@@ -2209,6 +2240,16 @@ cmd_server() {
       [[ -n "$input" ]] && dnstm_backend_tag="$input"
       read -r -p "Tunnel tag [$dnstm_tunnel_tag]: " input
       [[ -n "$input" ]] && dnstm_tunnel_tag="$input"
+      read -r -p "Add NetMod DNSTT-over-SSH tunnel on extra domain? [y/N]: " input
+      if [[ "${input:-n}" == "y" ]]; then
+        dnstm_netmod_setup=true
+        read -r -p "NetMod extra domain (e.g., nm.example.com): " input
+        [[ -n "$input" ]] && dnstm_netmod_domain="$input"
+        validate_domain_or_error "$dnstm_netmod_domain"
+        [[ "$dnstm_netmod_domain" != "$domain" ]] || error "NetMod domain must differ from main tunnel domain"
+        read -r -p "NetMod tunnel tag [$dnstm_netmod_tag]: " input
+        [[ -n "$input" ]] && dnstm_netmod_tag="$input"
+      fi
     fi
 
     case "$dnstm_backend" in
@@ -2218,6 +2259,12 @@ cmd_server() {
 
     ensure_dnstm_binary "$dnstm_path"
     dnstm_setup_server_stack "$domain" "$port" "$dnstm_transport" "$dnstm_backend" "$dnstm_backend_tag" "$dnstm_tunnel_tag" "$dnstm_router_mode" "$dnstm_ss_password" "$dnstm_ss_method"
+    if [[ "$dnstm_netmod_setup" == "true" ]]; then
+      [[ -n "$dnstm_netmod_domain" ]] || error "NetMod setup requested but no extra domain provided"
+      validate_domain_or_error "$dnstm_netmod_domain"
+      [[ "$dnstm_netmod_domain" != "$domain" ]] || error "NetMod domain must differ from main tunnel domain"
+      dnstm_add_netmod_tunnel "$dnstm_netmod_domain" "$dnstm_netmod_tag"
+    fi
 
     # Legacy service may exist from previous cores.
     systemctl stop slipstream-server 2>/dev/null || true
@@ -2241,6 +2288,9 @@ DNSTM_BACKEND_TYPE=$dnstm_backend
 DNSTM_BACKEND_TAG=$dnstm_backend_tag
 DNSTM_TUNNEL_TAG=$dnstm_tunnel_tag
 DNSTM_BACKEND_ADDRESS=$(dnstm_backend_address_for_type "$dnstm_backend" "$port")
+DNSTM_NETMOD_ENABLED=$dnstm_netmod_setup
+DNSTM_NETMOD_DOMAIN=$dnstm_netmod_domain
+DNSTM_NETMOD_TAG=$dnstm_netmod_tag
 SSH_AUTH_ENABLED=false
 SSH_BACKEND_PORT=
 EOF
@@ -2257,6 +2307,16 @@ EOF
     echo "Through this script:"
     echo "  slipstream-tunnel status"
     echo "  slipstream-tunnel dnstm router status"
+    if [[ "$dnstm_netmod_setup" == "true" ]]; then
+      local netmod_pubkey
+      netmod_pubkey=$(run_dnstm tunnel status -t "$dnstm_netmod_tag" 2>/dev/null | awk '/Public Key:/{getline; gsub(/^[[:space:]]+|[[:space:]]+$/,""); print; exit}')
+      echo ""
+      echo "NetMod DNSTT-over-SSH:"
+      echo "  domain: $dnstm_netmod_domain"
+      echo "  tag: $dnstm_netmod_tag"
+      [[ -n "$netmod_pubkey" ]] && echo "  pubkey: $netmod_pubkey"
+      echo "  ssh backend: 127.0.0.1:22"
+    fi
     echo "  slipstream-tunnel menu"
     echo "  sst"
     return 0
