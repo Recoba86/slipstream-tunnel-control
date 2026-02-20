@@ -2636,6 +2636,11 @@ prompt_scan_settings_for_profile() {
           ;;
         esac
       done
+
+      # Deep mode is intended for wide scan by default.
+      if [[ "$scan_dnstt_mode" == "deep" && "$scan_source" == "file" ]]; then
+        scan_source="generated"
+      fi
     fi
 
     while true; do
@@ -2656,6 +2661,9 @@ prompt_scan_settings_for_profile() {
       prompt_read input "DNS file path [$scan_file]: "
       [[ -n "$input" ]] && scan_file="$input"
       [[ -n "$scan_file" ]] || error "DNS file path is required when scan source is 'file'"
+      if [[ "$transport_mode" == "dnstt" && "$scan_dnstt_mode" == "deep" ]]; then
+        warn "DNSTT deep + file mode scans only that file list (not internet-wide)."
+      fi
     else
       if [[ "$transport_mode" != "dnstt" || "$scan_dnstt_mode" == "deep" ]]; then
         echo "Modes: list | fast | medium | all"
@@ -3436,8 +3444,10 @@ cmd_rescan() {
 
       if [[ "$scan_source" == "file" ]]; then
         validate_dns_file_or_error "$scan_file"
+        log "DNSTT deep scan source=file (seed list only): $scan_file"
         dnscan_args+=(--file "$scan_file")
       else
+        log "DNSTT deep scan source=generated (internet-wide by country/mode)"
         dnscan_args+=(
           --country "${SCAN_COUNTRY:-ir}"
           --mode "${SCAN_MODE:-fast}"
@@ -4068,8 +4078,10 @@ cmd_instance_rescan() {
 
       if [[ "$scan_source" == "file" ]]; then
         validate_dns_file_or_error "$scan_file"
+        log "DNSTT deep scan source=file for instance '$instance' (seed list only): $scan_file"
         dnscan_args+=(--file "$scan_file")
       else
+        log "DNSTT deep scan source=generated for instance '$instance' (internet-wide by country/mode)"
         dnscan_args+=(
           --country "${SCAN_COUNTRY:-ir}"
           --mode "${SCAN_MODE:-fast}"
