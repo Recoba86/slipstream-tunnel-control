@@ -17,7 +17,7 @@ SLIPSTREAM_ASSET_LAYOUT=""
 DNSCAN_REPO="nightowlnerd/dnscan"
 DNSCAN_VERSION="${DNSCAN_VERSION:-v1.4.0}"
 DNSTM_REPO="${DNSTM_REPO:-net2share/dnstm}"
-DNSTM_VERSION="${DNSTM_VERSION:-v0.6.5}"
+DNSTM_VERSION="${DNSTM_VERSION:-v0.6.6}"
 DNSTT_CLIENT_REPO="${DNSTT_CLIENT_REPO:-net2share/dnstt}"
 DNSTT_CLIENT_VERSION="${DNSTT_CLIENT_VERSION:-latest}"
 SCRIPT_REPO="${SCRIPT_REPO:-Recoba86/slipstream-tunnel-control}"
@@ -209,7 +209,7 @@ set_slipstream_source() {
   case "$core" in
   dnstm)
     default_repo="net2share/slipstream-rust-build"
-    default_version="v2026.02.05"
+    default_version="v2026.02.22.1"
     default_layout="binary"
     ;;
   nightowl)
