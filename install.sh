@@ -4059,6 +4059,39 @@ cmd_instance_select_server() {
   cmd_instance_status "$instance"
 }
 
+cmd_instance_set_server_manual() {
+  need_root
+  check_dependencies systemctl dig
+  local instance="${1:-}" selected="${2:-}"
+  [[ -n "$instance" ]] || error "Usage: slipstream-tunnel instance-set-dns-manual <name> [ip]"
+  validate_instance_name_or_error "$instance"
+  load_instance_config_or_error "$instance"
+
+  local cfg
+  cfg=$(instance_config_file "$instance")
+
+  if [[ -z "$selected" ]]; then
+    echo "=== Manual DNS Entry (Instance: $instance) ==="
+    read -r -p "Enter DNS resolver IPv4 (e.g., 1.1.1.1): " selected
+  fi
+  [[ -n "${selected:-}" ]] || {
+    warn "No DNS IP entered"
+    return 0
+  }
+  is_valid_ipv4 "$selected" || error "Invalid IPv4 address: $selected"
+
+  if ! probe_tunnel_data_path "$selected" "$DOMAIN" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"; then
+    error "Resolver $selected failed transport data-path validation. Pick another resolver."
+  fi
+
+  set_config_value "CURRENT_SERVER" "$selected" "$cfg"
+  write_instance_client_service "$instance" "$selected" "$DOMAIN" "$PORT" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"
+  systemctl daemon-reload
+  restart_instance_stack "$instance"
+  log "Instance '$instance' switched to DNS server (manual entry): $selected"
+  cmd_instance_status "$instance"
+}
+
 cmd_instance_rescan() {
   need_root
   check_dependencies dig systemctl wc head
@@ -4594,6 +4627,37 @@ cmd_select_server() {
   systemctl daemon-reload
   restart_client_stack
   log "Manually switched to DNS server: $selected"
+  cmd_dashboard
+}
+
+cmd_set_server_manual() {
+  need_root
+  check_dependencies systemctl dig
+  load_config_or_error
+  [[ "${MODE:-}" == "client" ]] || error "Manual DNS entry is available only in client mode"
+
+  local selected="${1:-}"
+  if [[ -z "$selected" ]]; then
+    echo "=== Manual DNS Entry ==="
+    read -r -p "Enter DNS resolver IPv4 (e.g., 1.1.1.1): " selected
+  fi
+  [[ -n "${selected:-}" ]] || {
+    warn "No DNS IP entered"
+    return 0
+  }
+  is_valid_ipv4 "$selected" || error "Invalid IPv4 address: $selected"
+
+  if ! probe_tunnel_data_path "$selected" "$DOMAIN" "${DNSTM_TRANSPORT:-slipstream}" "${DNSTM_DNSTT_PUBKEY:-}" "${DNSTM_SLIPSTREAM_CERT:-}" "${DNSTT_BIND_HOST:-127.0.0.1}"; then
+    error "Resolver $selected failed transport data-path validation. Pick another resolver."
+  fi
+
+  set_config_value "CURRENT_SERVER" "$selected" "$CONFIG_FILE"
+  local transport_port
+  transport_port=$(client_transport_port_from_config)
+  write_client_service "$selected" "$DOMAIN" "$transport_port"
+  systemctl daemon-reload
+  restart_client_stack
+  log "Manually switched to DNS server (manual entry): $selected"
   cmd_dashboard
 }
 
@@ -5740,6 +5804,15 @@ cmd_tunnel_select_dns() {
   fi
 }
 
+cmd_tunnel_set_dns_manual() {
+  local target="$1"
+  if [[ "$target" == "default" ]]; then
+    cmd_set_server_manual
+  else
+    cmd_instance_set_server_manual "$target"
+  fi
+}
+
 cmd_tunnel_rescan() {
   local target="$1"
   if [[ "$target" == "default" ]]; then
@@ -5772,10 +5845,11 @@ cmd_menu_manage_single_tunnel() {
     echo "7) Run runtime watchdog now"
     echo "8) Show DNS candidates"
     echo "9) Switch DNS resolver"
-    echo "10) Run DNS rescan and switch best"
-    echo "11) Edit tunnel settings"
+    echo "10) Enter DNS resolver manually"
+    echo "11) Run DNS rescan and switch best"
+    echo "12) Edit tunnel settings"
     if [[ "$target" != "default" ]]; then
-      echo "12) Delete this tunnel instance"
+      echo "13) Delete this tunnel instance"
     fi
     echo "0) Back"
     read -r -p "Select: " choice
@@ -5790,9 +5864,10 @@ cmd_menu_manage_single_tunnel() {
     7) cmd_tunnel_watchdog "$target" ;;
     8) cmd_tunnel_servers "$target" ;;
     9) cmd_tunnel_select_dns "$target" ;;
-    10) cmd_tunnel_rescan "$target" ;;
-    11) cmd_tunnel_edit "$target" ;;
-    12)
+    10) cmd_tunnel_set_dns_manual "$target" ;;
+    11) cmd_tunnel_rescan "$target" ;;
+    12) cmd_tunnel_edit "$target" ;;
+    13)
       if [[ "$target" == "default" ]]; then
         warn "Default tunnel cannot be deleted"
         continue
@@ -5886,8 +5961,9 @@ cmd_menu_client_monitor() {
     echo "2) Run full DNS rescan now (choose tunnel)"
     echo "3) Show verified DNS IP list (choose tunnel)"
     echo "4) Select DNS manually from verified list (choose tunnel)"
-    echo "5) Show status (choose tunnel)"
-    echo "6) Show all tunnels overview"
+    echo "5) Enter DNS resolver manually (choose tunnel)"
+    echo "6) Show status (choose tunnel)"
+    echo "7) Show all tunnels overview"
     echo "0) Back"
     read -r -p "Select: " choice
 
@@ -5915,10 +5991,15 @@ cmd_menu_client_monitor() {
       ;;
     5)
       if target=$(prompt_tunnel_target_from_menu true); then
+        cmd_tunnel_set_dns_manual "$target"
+      fi
+      ;;
+    6)
+      if target=$(prompt_tunnel_target_from_menu true); then
         cmd_tunnel_status "$target"
       fi
       ;;
-    6) cmd_tunnels_overview ;;
+    7) cmd_tunnels_overview ;;
     0) break ;;
     *) warn "Invalid option: $choice" ;;
     esac
