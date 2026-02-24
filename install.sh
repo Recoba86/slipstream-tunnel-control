@@ -101,6 +101,9 @@ Commands:
   speed-profile       Set profile: fast (SSH off) / secure (SSH on)
   core-switch         Switch current mode to another core (dnstm/nightowl/plus)
   dnstm               Pass-through to native dnstm CLI (server core)
+  dnstm-slip-watchdog Run DNSTM Slipstream stall watchdog check for one tunnel tag
+  dnstm-slip-watchdog-install
+                     Install/start DNSTM Slipstream watchdog timer for one tunnel tag
   auth-setup          Enable/update SSH auth overlay for server mode
   auth-disable        Disable SSH auth overlay for server mode
   auth-client-enable  Enable SSH auth overlay for client mode
@@ -1083,6 +1086,7 @@ dnstm_setup_server_stack() {
   esac
 
   run_dnstm tunnel add --transport "$transport" --backend "$backend_tag" --domain "$domain" -t "$tunnel_tag"
+  dnstm_auto_setup_slip_watchdog_for_tunnel "$tunnel_tag" "$transport"
   if [[ "$router_mode" == "single" ]]; then
     run_dnstm router switch -t "$tunnel_tag" >/dev/null 2>&1 || true
   fi
@@ -1102,6 +1106,78 @@ dnstm_add_netmod_tunnel() {
   run_dnstm tunnel remove -t "$tunnel_tag" --force >/dev/null 2>&1 || true
   run_dnstm tunnel add --transport dnstt --backend ssh --domain "$domain" -t "$tunnel_tag"
   run_dnstm router start >/dev/null 2>&1 || true
+}
+
+dnstm_slip_watchdog_state_file() {
+  local tag="$1"
+  echo "$WATCHDOG_STATE_DIR/dnstm-slip-${tag}.last_restart"
+}
+
+dnstm_slip_watchdog_log_file() {
+  local tag="$1"
+  echo "$TUNNEL_DIR/dnstm-slip-watchdog-${tag}.log"
+}
+
+dnstm_tunnel_status_value() {
+  local status_text="$1" key="$2"
+  awk -F': *' -v key="$key" '$1 == key {print $2; exit}' <<<"$status_text"
+}
+
+dnstm_slip_watchdog_unit_base() {
+  local tag="$1"
+  local safe
+  safe=$(printf '%s' "$tag" | tr -c 'A-Za-z0-9_.-' '-')
+  echo "dnstm-slip-watchdog-${safe}"
+}
+
+setup_dnstm_slip_watchdog_timer() {
+  local tag="$1"
+  local unit_dir="/etc/systemd/system"
+  local base service_name timer_name
+  [[ -n "$tag" ]] || error "DNSTM Slipstream watchdog requires a tunnel tag"
+
+  if [[ ! -d "$unit_dir" || ! -w "$unit_dir" ]]; then
+    warn "Skipping DNSTM Slipstream watchdog unit setup: $unit_dir is not writable"
+    return 0
+  fi
+
+  base=$(dnstm_slip_watchdog_unit_base "$tag")
+  service_name="${base}.service"
+  timer_name="${base}.timer"
+
+  cat >"${unit_dir}/${service_name}" <<EOF
+[Unit]
+Description=DNSTM Slipstream Stall Watchdog (${tag})
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=$TUNNEL_CMD_BIN dnstm-slip-watchdog "$tag"
+EOF
+
+  cat >"${unit_dir}/${timer_name}" <<EOF
+[Unit]
+Description=DNSTM Slipstream Stall Watchdog Timer (${tag})
+
+[Timer]
+OnBootSec=120s
+OnUnitActiveSec=20s
+AccuracySec=2s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable "$timer_name" >/dev/null 2>&1 || true
+  systemctl start "$timer_name" >/dev/null 2>&1 || true
+}
+
+dnstm_auto_setup_slip_watchdog_for_tunnel() {
+  local tunnel_tag="$1" transport="$2"
+  [[ -n "$tunnel_tag" ]] || return 0
+  [[ "$transport" == "slipstream" ]] || return 0
+  setup_dnstm_slip_watchdog_timer "$tunnel_tag" || true
 }
 
 should_auto_fallback_to_plus_for_arm() {
@@ -5604,6 +5680,83 @@ cmd_dnstm_passthrough() {
   fi
 }
 
+cmd_dnstm_slip_watchdog_install() {
+  need_root
+  ensure_mode_server_dnstm_or_error
+  local tag="${1:-}"
+  [[ -n "$tag" ]] || error "Usage: slipstream-tunnel dnstm-slip-watchdog-install <tunnel-tag>"
+
+  local status_text transport
+  status_text=$(run_dnstm tunnel status -t "$tag" 2>/dev/null) || error "Tunnel '$tag' not found"
+  transport=$(dnstm_tunnel_status_value "$status_text" "Transport")
+  [[ "$transport" == "Slipstream" ]] || error "Tunnel '$tag' is not Slipstream (transport=$transport)"
+
+  setup_dnstm_slip_watchdog_timer "$tag"
+  log "DNSTM Slipstream watchdog timer installed for tunnel '$tag' (runs every 20s)"
+}
+
+cmd_dnstm_slip_watchdog() {
+  need_root
+  ensure_mode_server_dnstm_or_error
+  check_dependencies systemctl journalctl grep awk date mkdir
+
+  local tag="${1:-}"
+  [[ -n "$tag" ]] || error "Usage: slipstream-tunnel dnstm-slip-watchdog <tunnel-tag>"
+
+  local status_text transport service_name domain port
+  status_text=$(run_dnstm tunnel status -t "$tag" 2>/dev/null) || exit 0
+  transport=$(dnstm_tunnel_status_value "$status_text" "Transport")
+  [[ "$transport" == "Slipstream" ]] || exit 0
+
+  service_name=$(dnstm_tunnel_status_value "$status_text" "Service")
+  domain=$(dnstm_tunnel_status_value "$status_text" "Domain")
+  port=$(dnstm_tunnel_status_value "$status_text" "Port")
+  [[ -n "$service_name" && -n "$domain" && -n "$port" ]] || exit 0
+
+  local reason="" timeout_hits=0 recent_router_log
+  if ! systemctl is-active --quiet "$service_name"; then
+    reason="$service_name service not active"
+  else
+    recent_router_log=$(journalctl -t dnstm --since "45 seconds ago" --no-pager -l 2>/dev/null || true)
+    if [[ -n "$recent_router_log" ]]; then
+      timeout_hits=$(printf '%s\n' "$recent_router_log" \
+        | grep -F "[dnsrouter] Forward error" \
+        | grep -F -- "-> 127.0.0.1:${port}:" \
+        | grep -F ".${domain} ->" \
+        | grep -Ec 'timeout waiting for response|failed to read response' || true)
+    fi
+    [[ "$timeout_hits" =~ ^[0-9]+$ ]] || timeout_hits=0
+    if (( timeout_hits >= 8 )); then
+      reason="router timeout spike for ${domain} on 127.0.0.1:${port} (${timeout_hits} hits/45s)"
+    fi
+  fi
+
+  [[ -n "$reason" ]] || exit 0
+
+  local now last=0 state_file log_file
+  now=$(date +%s)
+  state_file=$(dnstm_slip_watchdog_state_file "$tag")
+  log_file=$(dnstm_slip_watchdog_log_file "$tag")
+  mkdir -p "$WATCHDOG_STATE_DIR" "$TUNNEL_DIR"
+  if [[ -f "$state_file" ]]; then
+    last=$(cat "$state_file" 2>/dev/null || echo 0)
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  fi
+  if (( now - last < 60 )); then
+    exit 0
+  fi
+  echo "$now" >"$state_file"
+
+  local timestamp
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$timestamp] Restart triggered ($tag): $reason" >>"$log_file"
+  if systemctl restart "$service_name"; then
+    echo "[$timestamp] Restart completed ($tag)" >>"$log_file"
+  else
+    echo "[$timestamp] ERROR restart failed ($tag)" >>"$log_file"
+  fi
+}
+
 prompt_instance_name_from_menu() {
   local instance=""
   read -r -p "Instance name: " instance
@@ -6203,6 +6356,9 @@ cmd_menu_server_dnstm() {
       [[ -n "$port" ]] && add_args+=(-p "$port")
       [[ -n "$mtu" ]] && add_args+=(--mtu "$mtu")
       run_dnstm "${add_args[@]}"
+      if [[ -n "$tag" ]]; then
+        dnstm_auto_setup_slip_watchdog_for_tunnel "$tag" "$transport"
+      fi
       [[ -n "$tag" ]] && set_config_value "DNSTM_TUNNEL_TAG" "$tag" "$CONFIG_FILE"
       set_config_value "DNSTM_TRANSPORT" "$transport" "$CONFIG_FILE"
       set_config_value "DNSTM_BACKEND_TAG" "$backend" "$CONFIG_FILE"
@@ -7268,6 +7424,14 @@ main() {
   dnstm)
     shift
     cmd_dnstm_passthrough "$@"
+    ;;
+  dnstm-slip-watchdog)
+    shift
+    cmd_dnstm_slip_watchdog "${1:-}"
+    ;;
+  dnstm-slip-watchdog-install)
+    shift
+    cmd_dnstm_slip_watchdog_install "${1:-}"
     ;;
   auth-setup) cmd_auth_setup ;;
   auth-disable) cmd_auth_disable ;;
